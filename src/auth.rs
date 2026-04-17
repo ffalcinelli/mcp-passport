@@ -14,12 +14,36 @@ use tokio::sync::oneshot;
 use axum::{extract::{Query, State}, response::IntoResponse, routing::get, Router};
 use std::net::SocketAddr;
 
+#[derive(Clone)]
+pub struct OidcConfig {
+    pub discovery_url: Option<String>,
+    pub client_id: String,
+    pub redirect_url: String,
+    pub auth_url_override: Option<String>,
+    pub token_url_override: Option<String>,
+    pub par_url_override: Option<String>,
+    pub internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    pub internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
+}
+
+impl std::fmt::Debug for OidcConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcConfig")
+            .field("discovery_url", &self.discovery_url)
+            .field("client_id", &self.client_id)
+            .field("redirect_url", &self.redirect_url)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct AuthManager {
     client_id: String,
     auth_url: String,
     token_url: String,
     par_url: String,
     redirect_url: String,
+    resource: String,
     http_client: HttpClient,
     vault: Vault,
     internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
@@ -51,10 +75,13 @@ impl AuthManager {
         discovery_url: Option<&str>,
         client_id: String,
         redirect_url: String,
+        resource: String,
         service: &str,
         auth_url_override: Option<String>,
         token_url_override: Option<String>,
         par_url_override: Option<String>,
+        internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+        internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
     ) -> Result<Self> {
         let http_client = HttpClient::new();
         
@@ -85,10 +112,11 @@ impl AuthManager {
             token_url,
             par_url,
             redirect_url,
+            resource,
             http_client,
             vault: Vault::new(service),
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_url_tx,
+            internal_callback_tx,
         })
     }
 
@@ -98,7 +126,10 @@ impl AuthManager {
         token_url: String,
         par_url: String,
         redirect_url: String,
+        resource: String,
         service: &str,
+        internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+        internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
     ) -> Result<Self> {
         Ok(Self {
             client_id,
@@ -106,10 +137,11 @@ impl AuthManager {
             token_url,
             par_url,
             redirect_url,
+            resource,
             http_client: HttpClient::new(),
             vault: Vault::new(service),
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_url_tx,
+            internal_callback_tx,
         })
     }
 
@@ -124,7 +156,7 @@ impl AuthManager {
     }
 
     /// Full re-authentication flow: PAR -> Loopback Callback -> Token Exchange
-    pub async fn reauthenticate(&self, user_id: &str, url_tx: Option<oneshot::Sender<String>>) -> Result<()> {
+    pub async fn reauthenticate(&self, user_id: &str, scopes: Option<Vec<String>>, url_tx: Option<oneshot::Sender<String>>) -> Result<()> {
         info!("Starting FAPI 2.0 re-authentication flow for user '{}'...", user_id);
 
         // 1. Generate and store new ephemeral DPoP key
@@ -174,14 +206,27 @@ impl AuthManager {
 
         // 4. Pushed Authorization Request (PAR)
         info!("Step 1: Pushed Authorization Request (PAR)...");
-        let par_params = [
+        let mut par_params = vec![
             ("client_id", self.client_id.as_str()),
             ("response_type", "code"),
             ("redirect_uri", self.redirect_url.as_str()),
             ("code_challenge", pkce_challenge.as_str()),
             ("code_challenge_method", "S256"),
             ("state", &state_val),
+            ("resource", self.resource.as_str()),
         ];
+
+        let scope_str;
+        let mut s_vec = if let Some(ref s) = scopes {
+            s.clone()
+        } else {
+            vec![]
+        };
+        if !s_vec.contains(&"openid".to_string()) {
+            s_vec.push("openid".to_string());
+        }
+        scope_str = s_vec.join(" ");
+        par_params.push(("scope", &scope_str));
 
         let par_res = self.http_client
             .post(&self.par_url)
@@ -193,14 +238,14 @@ impl AuthManager {
             let error_text = par_res.text().await?;
             error!("PAR request failed: {}", error_text);
             server_handle.abort();
-            anyhow::bail!("PAR request failed");
+            anyhow::bail!("PAR request failed: {}", error_text);
         }
 
         let par_data: ParResponse = par_res.json().await?;
         
         // 5. Direct user to Auth URL
         let auth_url = format!(
-            "{}?client_id={}&request_uri={}",
+            "{}?client_id={}&response_type=code&request_uri={}",
             self.auth_url, self.client_id, par_data.request_uri
         );
 
@@ -257,12 +302,13 @@ impl AuthManager {
     ) -> Result<()> {
         let dpop_proof = dpop_key.generate_proof("POST", &self.token_url)?;
 
-        let params = [
+        let params = vec![
             ("grant_type", "authorization_code"),
             ("client_id", self.client_id.as_str()),
-            ("code", code.secret()),
+            ("code", code.secret().as_str()),
             ("redirect_uri", self.redirect_url.as_str()),
-            ("code_verifier", pkce_verifier.secret()),
+            ("code_verifier", pkce_verifier.secret().as_str()),
+            ("resource", self.resource.as_str()),
         ];
 
         let res = self.http_client
@@ -275,7 +321,7 @@ impl AuthManager {
         if !res.status().is_success() {
             let err = res.text().await?;
             error!("Token exchange failed: {}", err);
-            anyhow::bail!("Token exchange failed");
+            anyhow::bail!("Token exchange failed: {}", err);
         }
 
         #[derive(Deserialize)]

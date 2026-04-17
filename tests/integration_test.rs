@@ -1,7 +1,8 @@
 use mcp_passport::proxy::Proxy;
 use mcp_passport::vault::Vault;
 use mcp_passport::crypto::DpopKey;
-use mcp_passport::auth::AuthManager;
+use mcp_passport::auth::OidcConfig;
+use mcp_passport::config::AuthScheme;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -67,7 +68,8 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
 
     let keycloak_port = keycloak_container.get_host_port_ipv4(8080).await?;
     let keycloak_base = format!("http://127.0.0.1:{}", keycloak_port);
-    let oidc_base = format!("{}/realms/mcp/protocol/openid-connect", keycloak_base);
+    let realm_base = format!("{}/realms/mcp", keycloak_base);
+    let oidc_base = format!("{}/protocol/openid-connect", realm_base);
     
     info!("Keycloak started at {}", keycloak_base);
 
@@ -83,24 +85,25 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
     info!("Mock MCP server started at {}", mock_url);
 
     // 4. Seed the vault for test_user
-    let test_svc = "mcp-passport-keycloak-integration-v2";
+    let test_svc = "mcp-passport-keycloak-integration-v10";
     let vault = Vault::new(test_svc);
     vault.store_token("test_user_kc", "test_access_token")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key("test_user_kc", &dpop_key.to_bytes())?;
 
-    // 5. Initialize AuthManager and Proxy
-    let auth_manager = Arc::new(AuthManager::discover(
-        None,
-        "mcp-passport".into(),
-        "http://127.0.0.1:8082/callback".into(),
-        test_svc,
-        Some(format!("{}/auth", oidc_base)),
-        Some(format!("{}/token", oidc_base)),
-        Some(format!("{}/par", oidc_base)),
-    ).await?);
+    // 5. Initialize OidcConfig and Proxy
+    let oidc_config = OidcConfig {
+        discovery_url: None,
+        client_id: "mcp-passport".into(),
+        redirect_url: "http://127.0.0.1:8082/callback".into(),
+        auth_url_override: Some(format!("{}/auth", oidc_base)),
+        token_url_override: Some(format!("{}/token", oidc_base)),
+        par_url_override: Some(format!("{}/par", oidc_base)),
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
 
-    let proxy = Arc::new(Proxy::new(&mock_url, "test_user_kc", auth_manager, test_svc, "2025-11-25"));
+    let proxy = Arc::new(Proxy::new(&mock_url, "test_user_kc", oidc_config, test_svc, "2025-11-25", AuthScheme::Dpop));
     
     // 6. Mock stdio
     let (mut client_writer, proxy_reader) = io::duplex(1024);

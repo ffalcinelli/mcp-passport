@@ -1,4 +1,16 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthScheme {
+    Bearer,
+    Dpop,
+}
+
+impl Default for AuthScheme {
+    fn default() -> Self {
+        Self::Bearer
+    }
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -46,6 +58,10 @@ pub struct Config {
     /// MCP Protocol Version to include in headers
     #[arg(long, env = "MCP_PASSPORT_MCP_PROTOCOL_VERSION", default_value = "2025-11-25")]
     pub mcp_protocol_version: String,
+
+    /// Authorization header scheme (bearer or dpop)
+    #[arg(long, env = "MCP_PASSPORT_AUTH_SCHEME", value_enum, default_value_t = AuthScheme::Bearer)]
+    pub auth_scheme: AuthScheme,
 }
 
 impl Config {

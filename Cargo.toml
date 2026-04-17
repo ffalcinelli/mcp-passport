@@ -47,3 +47,4 @@ clap = { version = "4.5", features = ["derive", "env"] }
 [dev-dependencies]
 testcontainers = "0.23"
 tokio = { version = "1.37", features = ["full", "macros"] }
+fantoccini = "0.21"

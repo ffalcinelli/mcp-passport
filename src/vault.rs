@@ -2,8 +2,9 @@ use keyring::Entry;
 use crate::Result;
 use anyhow::Context;
 
+#[derive(Clone)]
 pub struct Vault {
-    service: String,
+    pub service: String,
 }
 
 impl Vault {

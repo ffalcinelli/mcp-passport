@@ -1,6 +1,6 @@
+use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::Config;
 use mcp_passport::proxy::Proxy;
-use mcp_passport::auth::AuthManager;
 use mcp_passport::Result;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -51,22 +51,24 @@ async fn main() -> Result<()> {
         }
     });
 
-    let auth_manager = Arc::new(AuthManager::discover(
-        config.oidc_discovery_url.as_deref(),
-        config.oidc_client_id.clone(),
-        config.oidc_redirect_url.clone(),
-        "mcp-passport",
-        config.kc_auth_url.clone(),
-        config.kc_token_url.clone(),
-        config.kc_par_url.clone(),
-    ).await?);
+    let oidc_config = OidcConfig {
+        discovery_url: config.oidc_discovery_url.clone(),
+        client_id: config.oidc_client_id.clone(),
+        redirect_url: config.oidc_redirect_url.clone(),
+        auth_url_override: config.kc_auth_url.clone(),
+        token_url_override: config.kc_token_url.clone(),
+        par_url_override: config.kc_par_url.clone(),
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
 
     let proxy = Arc::new(Proxy::new(
         &config.remote_mcp_url,
         &config.user_id,
-        auth_manager,
+        oidc_config,
         "mcp-passport",
         &config.mcp_protocol_version,
+        config.auth_scheme,
     ));
     let sse_url = config.remote_sse_url.clone();
 

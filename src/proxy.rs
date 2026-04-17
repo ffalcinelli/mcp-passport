@@ -1,12 +1,13 @@
 use crate::Result;
 use crate::crypto::DpopKey;
 use crate::vault::Vault;
-use crate::auth::AuthManager;
-use reqwest::{Client, StatusCode};
+use crate::auth::{AuthManager, OidcConfig};
+use crate::config::AuthScheme;
+use reqwest::{Client, StatusCode, header::HeaderMap};
 use serde_json::Value;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, RwLock};
 use anyhow::Context;
 
 pub struct Proxy {
@@ -16,20 +17,68 @@ pub struct Proxy {
     suspension_tx: watch::Sender<bool>,
     vault: Vault,
     user_id: String,
-    auth_manager: Arc<AuthManager>,
+    oidc_config: OidcConfig,
+    pub auth_manager: Arc<RwLock<Option<AuthManager>>>,
     protocol_version: String,
+    auth_scheme: AuthScheme,
     session_id: Mutex<Option<String>>,
     reauth_mutex: Mutex<()>,
     last_reauth: Mutex<Option<std::time::Instant>>,
+}
+
+#[derive(Debug, Default)]
+struct WwwAuthenticate {
+    resource_metadata: Option<String>,
+    scope: Option<Vec<String>>,
+    error: Option<String>,
+}
+
+impl WwwAuthenticate {
+    fn parse(headers: &HeaderMap) -> Self {
+        let mut result = Self::default();
+        if let Some(auth_val) = headers.get(reqwest::header::WWW_AUTHENTICATE).and_then(|h| h.to_str().ok()) {
+            debug!("Parsing WWW-Authenticate: {}", auth_val);
+            
+            // Basic parsing for resource_metadata and scope
+            if let Some(rm) = extract_param(auth_val, "resource_metadata") {
+                result.resource_metadata = Some(rm);
+            }
+            if let Some(sc) = extract_param(auth_val, "scope") {
+                result.scope = Some(sc.split_whitespace().map(|s| s.to_string()).collect());
+            }
+            if let Some(err) = extract_param(auth_val, "error") {
+                result.error = Some(err);
+            }
+        }
+        result
+    }
+}
+
+fn extract_param(header: &str, param: &str) -> Option<String> {
+    let needle = format!("{}=", param);
+    if let Some(start) = header.find(&needle) {
+        let val_start = start + needle.len();
+        let remainder = &header[val_start..];
+        if remainder.starts_with('"') {
+            if let Some(end) = remainder[1..].find('"') {
+                return Some(remainder[1..end + 1].to_string());
+            }
+        } else {
+            let end = remainder.find(',').unwrap_or(remainder.len());
+            return Some(remainder[..end].to_string());
+        }
+    }
+    None
 }
 
 impl Proxy {
     pub fn new(
         remote_url: &str,
         user_id: &str,
-        auth_manager: Arc<AuthManager>,
+        oidc_config: OidcConfig,
         service: &str,
         protocol_version: &str,
+        auth_scheme: AuthScheme,
     ) -> Self {
         let (tx, rx) = watch::channel(false);
         Self {
@@ -39,61 +88,134 @@ impl Proxy {
             suspension_tx: tx,
             vault: Vault::new(service),
             user_id: user_id.to_string(),
-            auth_manager,
+            oidc_config,
+            auth_manager: Arc::new(RwLock::new(None)),
             protocol_version: protocol_version.to_string(),
+            auth_scheme,
             session_id: Mutex::new(None),
             reauth_mutex: Mutex::new(()),
             last_reauth: Mutex::new(None),
         }
     }
 
+    async fn ensure_auth_manager(&self, metadata_url: Option<&str>) -> Result<Arc<AuthManager>> {
+        {
+            let lock = self.auth_manager.read().await;
+            if let Some(am) = lock.as_ref() {
+                return Ok(Arc::new(am.clone()));
+            }
+        }
+
+        let mut lock = self.auth_manager.write().await;
+        // Re-check after acquiring write lock
+        if let Some(am) = lock.as_ref() {
+            return Ok(Arc::new(am.clone()));
+        }
+
+        let discovery_url = metadata_url
+            .map(|s| s.to_string())
+            .or_else(|| self.oidc_config.discovery_url.clone());
+
+        info!("Performing dynamic discovery for AuthManager (url: {:?})...", discovery_url);
+        
+        let am = AuthManager::discover(
+            discovery_url.as_deref(),
+            self.oidc_config.client_id.clone(),
+            self.oidc_config.redirect_url.clone(),
+            self.remote_url.clone(), // This is the 'resource'
+            &self.vault.service,
+            self.oidc_config.auth_url_override.clone(),
+            self.oidc_config.token_url_override.clone(),
+            self.oidc_config.par_url_override.clone(),
+            self.oidc_config.internal_url_tx.clone(),
+            self.oidc_config.internal_callback_tx.clone(),
+        ).await?;
+
+        let am_shared = Arc::new(am);
+        *lock = Some((*am_shared).clone());
+        Ok(am_shared)
+    }
+
     /// Primary entry point for stdio -> HTTP bridge
     pub async fn handle_request(self: Arc<Self>, payload: Value) -> Result<Value> {
         self.wait_for_airlock().await?;
 
-        let token = match self.vault.get_token(&self.user_id)? {
-            Some(t) => t,
-            None => {
-                info!("No token found for user, triggering re-authentication...");
-                self.trigger_reauth(None).await?;
-                return Box::pin(self.clone().handle_request(payload)).await;
+        let token_opt = self.vault.get_token(&self.user_id)?;
+        
+        let response = if let Some(ref token) = token_opt {
+            let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
+                Some(bytes) => DpopKey::from_bytes(&bytes)?,
+                None => {
+                    info!("No DPoP key found for user, triggering re-authentication...");
+                    self.trigger_reauth(None, None, None).await?;
+                    return Box::pin(self.clone().handle_request(payload)).await;
+                }
+            };
+            
+            let dpop_proof = dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
+
+            let auth_header = match self.auth_scheme {
+                AuthScheme::Bearer => format!("Bearer {}", token),
+                AuthScheme::Dpop => format!("DPoP {}", token),
+            };
+
+            let mut request = self.http_client
+                .post(&self.remote_url)
+                .header("Authorization", auth_header)
+                .header("DPoP", dpop_proof)
+                .header("MCP-Protocol-Version", &self.protocol_version);
+
+            let sid = {
+                let sid_lock = self.session_id.lock().await;
+                sid_lock.clone()
+            };
+            
+            if let Some(s) = sid {
+                request = request.header("MCP-Session-Id", s);
             }
-        };
-        
-        let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
-            Some(bytes) => DpopKey::from_bytes(&bytes)?,
-            None => {
-                info!("No DPoP key found for user, triggering re-authentication...");
-                self.trigger_reauth(None).await?;
-                return Box::pin(self.clone().handle_request(payload)).await;
+
+            request.json(&payload).send().await?
+        } else {
+            // No token. Send unauthenticated request to trigger discovery via 401
+            info!("No token found for user, sending unauthenticated request to trigger discovery...");
+            let mut request = self.http_client
+                .post(&self.remote_url)
+                .header("MCP-Protocol-Version", &self.protocol_version);
+            
+            let sid = {
+                let sid_lock = self.session_id.lock().await;
+                sid_lock.clone()
+            };
+            if let Some(s) = sid {
+                request = request.header("MCP-Session-Id", s);
             }
+
+            request.json(&payload).send().await?
         };
-        
-        let dpop_proof = dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(&token))?;
-
-        let mut request = self.http_client
-            .post(&self.remote_url)
-            .header("Authorization", format!("DPoP {}", token))
-            .header("DPoP", dpop_proof)
-            .header("MCP-Protocol-Version", &self.protocol_version);
-
-        let sid = {
-            let sid_lock = self.session_id.lock().await;
-            sid_lock.clone()
-        };
-        
-        if let Some(s) = sid {
-            request = request.header("MCP-Session-Id", s);
-        }
-
-        let response = request.json(&payload).send().await?;
 
         if response.status() == StatusCode::UNAUTHORIZED {
             warn!("401 Unauthorized received. Activating Airlock suspension...");
-            self.trigger_reauth(Some(&token)).await?;
+            let challenge = WwwAuthenticate::parse(response.headers());
+            
+            let metadata_url = challenge.resource_metadata.or_else(|| {
+                // Fallback to well-known if header is missing
+                info!("WWW-Authenticate missing resource_metadata, falling back to well-known...");
+                Some(format!("{}/.well-known/oauth-protected-resource", self.remote_url.trim_end_matches('/')))
+            });
+
+            self.trigger_reauth(token_opt.as_deref(), metadata_url.as_deref(), challenge.scope).await?;
 
             // Retry the request after re-authentication
             return Box::pin(self.clone().handle_request(payload)).await;
+        }
+
+        if response.status() == StatusCode::FORBIDDEN {
+            let challenge = WwwAuthenticate::parse(response.headers());
+            if challenge.error.as_deref() == Some("insufficient_scope") {
+                warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
+                self.trigger_reauth(token_opt.as_deref(), None, challenge.scope).await?;
+                return Box::pin(self.clone().handle_request(payload)).await;
+            }
         }
 
         // Capture Session ID if returned
@@ -113,7 +235,7 @@ impl Proxy {
         Ok(body)
     }
 
-    async fn trigger_reauth(&self, failing_token: Option<&str>) -> Result<()> {
+    async fn trigger_reauth(&self, failing_token: Option<&str>, metadata_url: Option<&str>, scopes: Option<Vec<String>>) -> Result<()> {
         let _guard = self.reauth_mutex.lock().await;
         
         // If airlock is already active, someone else is handling it.
@@ -142,11 +264,11 @@ impl Proxy {
         // If another task just finished re-authenticating, the token in the vault will be different or present.
         let current_token = self.vault.get_token(&self.user_id)?;
         if let (Some(failing), Some(current)) = (failing_token, current_token.as_deref()) {
-            if failing != current {
+            if failing != current && scopes.is_none() {
                 info!("Token has already been updated by another task. Skipping redundant re-auth.");
                 return Ok(());
             }
-        } else if failing_token.is_none() && current_token.is_some() {
+        } else if failing_token.is_none() && current_token.is_some() && scopes.is_none() {
             info!("Token was missing but is now present. Skipping redundant re-auth.");
             return Ok(());
         }
@@ -154,10 +276,14 @@ impl Proxy {
         let _ = self.suspension_tx.send(true);
         info!("Airlock activated. Performing re-authentication...");
         
-        // Clear invalid token from vault to avoid re-using it
-        let _ = self.vault.delete_token(&self.user_id);
+        // Clear invalid token from vault to avoid re-using it (only if not a step-up scope request)
+        if scopes.is_none() {
+            let _ = self.vault.delete_token(&self.user_id);
+        }
 
-        if let Err(e) = self.auth_manager.reauthenticate(&self.user_id, None).await {
+        let auth_manager = self.ensure_auth_manager(metadata_url).await?;
+
+        if let Err(e) = auth_manager.reauthenticate(&self.user_id, scopes, None).await {
             error!("Re-authentication failed: {:?}", e);
             let _ = self.suspension_tx.send(false);
             return Err(e);
@@ -184,29 +310,34 @@ impl Proxy {
         loop {
             self.wait_for_airlock().await?;
 
-            let token = match self.vault.get_token(&self.user_id)? {
-                Some(t) => t,
-                None => {
-                    info!("No token found for user in SSE listener, triggering re-authentication...");
-                    self.trigger_reauth(None).await?;
-                    continue;
-                }
-            };
-            let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
-                Some(bytes) => DpopKey::from_bytes(&bytes)?,
-                None => {
-                    info!("No DPoP key found for user in SSE listener, triggering re-authentication...");
-                    self.trigger_reauth(None).await?;
-                    continue;
-                }
-            };
+            let token_opt = self.vault.get_token(&self.user_id)?;
 
-            let dpop_proof = dpop_key.generate_proof_with_ath("GET", sse_url, Some(&token))?;
+            let mut request = if let Some(token) = token_opt.as_ref() {
+                let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
+                    Some(bytes) => DpopKey::from_bytes(&bytes)?,
+                    None => {
+                        info!("No DPoP key found for user in SSE listener, triggering re-authentication...");
+                        self.trigger_reauth(None, None, None).await?;
+                        continue;
+                    }
+                };
 
-            let mut request = self.http_client.get(sse_url)
-                .header("Authorization", format!("DPoP {}", token))
-                .header("DPoP", dpop_proof)
-                .header("MCP-Protocol-Version", &self.protocol_version);
+                let dpop_proof = dpop_key.generate_proof_with_ath("GET", sse_url, Some(token))?;
+
+                let auth_header = match self.auth_scheme {
+                    AuthScheme::Bearer => format!("Bearer {}", token),
+                    AuthScheme::Dpop => format!("DPoP {}", token),
+                };
+
+                self.http_client.get(sse_url)
+                    .header("Authorization", auth_header)
+                    .header("DPoP", dpop_proof)
+                    .header("MCP-Protocol-Version", &self.protocol_version)
+            } else {
+                info!("No token found for user in SSE listener, sending unauthenticated request to trigger discovery...");
+                self.http_client.get(sse_url)
+                    .header("MCP-Protocol-Version", &self.protocol_version)
+            };
 
             let sid = {
                 let sid_lock = self.session_id.lock().await;
@@ -232,7 +363,14 @@ impl Proxy {
                         if status.as_u16() == 401 {
                             warn!("401 Unauthorized received in SSE listener ({}). Triggering re-authentication...", sse_url);
                             source.close();
-                            self.trigger_reauth(Some(&token)).await?;
+                            
+                            let challenge = WwwAuthenticate::parse(resp.headers());
+                            let metadata_url = challenge.resource_metadata.or_else(|| {
+                                Some(format!("{}/.well-known/oauth-protected-resource", self.remote_url.trim_end_matches('/')))
+                            });
+
+                            let failing_token = self.vault.get_token(&self.user_id)?;
+                            self.trigger_reauth(failing_token.as_deref(), metadata_url.as_deref(), challenge.scope).await?;
                             break;
                         } else {
                             error!("SSE error: Invalid status code {} from {}. Response: {:?}", status, sse_url, resp);
