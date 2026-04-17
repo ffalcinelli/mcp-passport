@@ -1,20 +1,25 @@
-use mcp_passport::proxy::Proxy;
+use anyhow::Context;
+use ax_extract::Form;
+use axum::http::{HeaderMap, StatusCode};
+use axum::{
+    extract as ax_extract,
+    extract::Query,
+    routing::{get, post},
+    Json, Router,
+};
+use fantoccini::{ClientBuilder, Locator};
 use mcp_passport::auth::OidcConfig;
-use mcp_passport::vault::Vault;
 use mcp_passport::config::AuthScheme;
+use mcp_passport::proxy::Proxy;
+use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::time::Duration;
-use tokio::time::timeout;
-use ax_extract::Form;
-use axum::{routing::{post, get}, Json, Router, extract as ax_extract, extract::Query};
-use axum::http::{HeaderMap, StatusCode};
-use tokio::sync::{oneshot, mpsc};
-use anyhow::Context;
-use tracing::{info, error};
 use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
-use fantoccini::{ClientBuilder, Locator};
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
+use tracing::{error, info};
 
 #[derive(Clone)]
 struct McpState {
@@ -24,25 +29,35 @@ struct McpState {
 async fn mock_mcp_handler(
     ax_extract::State(state): ax_extract::State<McpState>,
     headers: HeaderMap,
-    Json(payload): Json<Value>
+    Json(payload): Json<Value>,
 ) -> (StatusCode, HeaderMap, Json<Value>) {
     let mut resp_headers = HeaderMap::new();
     let auth = headers.get("Authorization");
     if let Some(auth_str) = auth.and_then(|h| h.to_str().ok()) {
         if auth_str.contains("valid_mock_token") {
-            return (StatusCode::OK, resp_headers, Json(json!({
-                "jsonrpc": "2.0",
-                "id": payload["id"],
-                "result": {"status": "ok"}
-            })));
+            return (
+                StatusCode::OK,
+                resp_headers,
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {"status": "ok"}
+                })),
+            );
         }
     }
-    
+
     resp_headers.insert(
         reqwest::header::WWW_AUTHENTICATE,
-        format!("Bearer resource_metadata=\"{}\"", state.metadata_url).parse().unwrap()
+        format!("Bearer resource_metadata=\"{}\"", state.metadata_url)
+            .parse()
+            .unwrap(),
     );
-    (StatusCode::UNAUTHORIZED, resp_headers, Json(json!({"error": "unauthorized"})))
+    (
+        StatusCode::UNAUTHORIZED,
+        resp_headers,
+        Json(json!({"error": "unauthorized"})),
+    )
 }
 
 use std::collections::HashMap;
@@ -66,13 +81,16 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     let chromedriver_img = GenericImage::new("selenium/standalone-chrome", "latest")
         .with_wait_for(WaitFor::message_on_stdout("Started Selenium Standalone"))
         .with_network("host");
-    let _chromedriver_container = chromedriver_img.start().await.expect("Failed to start Chromedriver");
+    let _chromedriver_container = chromedriver_img
+        .start()
+        .await
+        .expect("Failed to start Chromedriver");
     let chrome_url = "http://localhost:4444";
 
     // 2. Setup Mock OIDC Server with UI and session tracking
     let (state_tx, mut _state_rx) = mpsc::channel::<String>(1);
     let sessions = Arc::new(TokioMutex::new(HashMap::<String, String>::new()));
-    
+
     let oidc_state = OidcState {
         sessions,
         state_tx: Arc::new(TokioMutex::new(state_tx)),
@@ -112,10 +130,10 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
                 let lock = state.sessions.lock().await;
                 lock.get(req_uri).cloned().unwrap_or_default()
             };
-            
+
             let code = "mock_code";
-            let redirect_uri = "http://localhost:8082/callback"; 
-            
+            let redirect_uri = "http://localhost:8082/callback";
+
             axum::response::Html(format!(
                 "<html><body><form action='{}' method='GET'>
                 <input type='text' id='username' name='username' value='jdoe'>
@@ -135,22 +153,28 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
         }))
         .with_state(oidc_state);
 
-    tokio::spawn(async move { let _ = axum::serve(oidc_listener, oidc_app).await; });
+    tokio::spawn(async move {
+        let _ = axum::serve(oidc_listener, oidc_app).await;
+    });
 
     // 3. Setup Mock MCP Server
     let mcp_app = Router::new()
         .route("/rpc", post(mock_mcp_handler))
-        .with_state(McpState { metadata_url: format!("{}/discovery", oidc_url_for_mcp) });
+        .with_state(McpState {
+            metadata_url: format!("{}/discovery", oidc_url_for_mcp),
+        });
 
     let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let mcp_addr = mcp_listener.local_addr()?;
     let mcp_url = format!("http://127.0.0.1:{}/rpc", mcp_addr.port());
-    tokio::spawn(async move { let _ = axum::serve(mcp_listener, mcp_app).await; });
+    tokio::spawn(async move {
+        let _ = axum::serve(mcp_listener, mcp_app).await;
+    });
 
     // 4. Initialize OidcConfig with test channels
     let (url_tx, url_rx) = oneshot::channel::<String>();
     let oidc_config = OidcConfig {
-        discovery_url: None, 
+        discovery_url: None,
         client_id: "test-client".into(),
         redirect_url: "http://localhost:8082/callback".into(),
         auth_url_override: None,
@@ -164,7 +188,14 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-compliance-headless-v1";
     let vault = Vault::new(test_svc);
     let _ = vault.delete_token("mock_user");
-    let proxy = Arc::new(Proxy::new(&mcp_url, "mock_user", oidc_config, test_svc, "2025-11-25", AuthScheme::Bearer));
+    let proxy = Arc::new(Proxy::new(
+        &mcp_url,
+        "mock_user",
+        oidc_config,
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    ));
 
     // 6. Start Proxy Task
     let (mut client_writer, proxy_reader) = io::duplex(1024);
@@ -184,7 +215,9 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     });
 
     // 7. Execute Request
-    client_writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"ping\"}\n").await?;
+    client_writer
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"ping\"}\n")
+        .await?;
     client_writer.flush().await?;
 
     // 8. Headless Browser Automation
@@ -195,23 +228,41 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     let chrome_opts = json!({ "args": ["--headless", "--disable-gpu", "--no-sandbox"] });
     caps.insert("goog:chromeOptions".to_string(), chrome_opts);
 
-    let client = ClientBuilder::native().capabilities(caps).connect(&chrome_url).await?;
+    let client = ClientBuilder::native()
+        .capabilities(caps)
+        .connect(&chrome_url)
+        .await?;
     client.goto(&auth_url).await?;
-    
+
     // Wait for our mock UI form and click Login
     client.wait().for_element(Locator::Id("username")).await?;
     info!("Headless browser filling mock form...");
-    client.find(Locator::Id("username")).await?.send_keys("jdoe").await?;
+    client
+        .find(Locator::Id("username"))
+        .await?
+        .send_keys("jdoe")
+        .await?;
     client.find(Locator::Id("login")).await?.click().await?;
-    
+
     // Wait for the redirect to happen (our loopback will handle it)
     info!("Headless browser waiting for success message...");
-    match timeout(Duration::from_secs(30), client.wait().for_element(Locator::XPath("//*[contains(text(), 'Authentication successful')]"))).await {
+    match timeout(
+        Duration::from_secs(30),
+        client.wait().for_element(Locator::XPath(
+            "//*[contains(text(), 'Authentication successful')]",
+        )),
+    )
+    .await
+    {
         Ok(_) => info!("Headless browser login completed."),
         Err(_) => {
             let cur = client.current_url().await?;
             let src = client.source().await?;
-            error!("Timed out waiting for success. Current URL: {}. Source snippet: {}", cur, &src[..src.len().min(500)]);
+            error!(
+                "Timed out waiting for success. Current URL: {}. Source snippet: {}",
+                cur,
+                &src[..src.len().min(500)]
+            );
             panic!("Timeout waiting for success message");
         }
     }
@@ -219,7 +270,9 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
 
     // 9. Read final response
     let mut reader = BufReader::new(&mut client_reader).lines();
-    let res_line = timeout(Duration::from_secs(30), reader.next_line()).await??.context("Failed to read response")?;
+    let res_line = timeout(Duration::from_secs(30), reader.next_line())
+        .await??
+        .context("Failed to read response")?;
     let response: Value = serde_json::from_str(&res_line)?;
     assert_eq!(response["result"]["status"], "ok");
 
