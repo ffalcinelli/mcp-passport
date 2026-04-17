@@ -297,32 +297,35 @@ impl Proxy {
             return Ok(());
         }
 
-        // Circuit Breaker: prevent rapid consecutive re-authentications
-        let now = std::time::Instant::now();
-        {
-            let mut last = self.last_reauth.lock().await;
-            if let Some(t) = *last {
-                if now.duration_since(t) < std::time::Duration::from_secs(10) {
-                    error!("Authentication loop detected. Re-authentication triggered too frequently (within 10s).");
-                    return Err(anyhow::anyhow!("Authentication loop detected. Please check your credentials and environment configuration."));
-                }
-            }
-            *last = Some(now);
-        }
-
         // Re-check if re-authentication is still needed after acquiring the lock.
         // If another task just finished re-authenticating, the token in the vault will be different or present.
         let current_token = self.vault.get_token(&self.user_id)?;
         if let (Some(failing), Some(current)) = (failing_token, current_token.as_deref()) {
             if failing != current && scopes.is_none() {
                 info!(
-                    "Token has already been updated by another task. Skipping redundant re-auth."
+                    "Token has already been updated by another task (failing: {}, current: {}). Skipping redundant re-auth.",
+                    &failing[..std::cmp::min(8, failing.len())],
+                    &current[..std::cmp::min(8, current.len())]
                 );
                 return Ok(());
             }
         } else if failing_token.is_none() && current_token.is_some() && scopes.is_none() {
             info!("Token was missing but is now present. Skipping redundant re-auth.");
             return Ok(());
+        }
+
+        // Circuit Breaker: prevent rapid consecutive re-authentications
+        // We check this ONLY if we've determined that we actually need to re-auth.
+        let now = std::time::Instant::now();
+        {
+            let mut last = self.last_reauth.lock().await;
+            if let Some(t) = *last {
+                if now.duration_since(t) < std::time::Duration::from_secs(2) {
+                    error!("Authentication loop detected. Re-authentication triggered too frequently (within 2s).");
+                    return Err(anyhow::anyhow!("Authentication loop detected. Please check your credentials and environment configuration."));
+                }
+            }
+            *last = Some(now);
         }
 
         let _ = self.suspension_tx.send(true);
