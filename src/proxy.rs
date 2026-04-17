@@ -348,25 +348,37 @@ impl Proxy {
             }
         };
 
-        if let Err(e) = auth_manager
-            .reauthenticate(&self.user_id, scopes, None)
-            .await
-        {
-            error!("Re-authentication failed: {:?}", e);
-            let _ = self.suspension_tx.send(false);
-            
-            // Reset last_reauth on failure to allow immediate retry after configuration fixes
-            {
-                let mut last = self.last_reauth.lock().await;
-                *last = None;
-            }
-            
-            return Err(e);
-        }
+        let reauth_res = tokio::time::timeout(
+            std::time::Duration::from_secs(300), // 5 minute timeout for user to login
+            auth_manager.reauthenticate(&self.user_id, scopes, None),
+        )
+        .await;
 
-        info!("Re-authentication successful. Deactivating Airlock...");
-        let _ = self.suspension_tx.send(false);
-        Ok(())
+        match reauth_res {
+            Ok(Ok(_)) => {
+                info!("Re-authentication successful. Deactivating Airlock...");
+                let _ = self.suspension_tx.send(false);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                error!("Re-authentication failed: {:?}", e);
+                let _ = self.suspension_tx.send(false);
+                {
+                    let mut last = self.last_reauth.lock().await;
+                    *last = None;
+                }
+                Err(e)
+            }
+            Err(_) => {
+                error!("Re-authentication timed out after 5 minutes.");
+                let _ = self.suspension_tx.send(false);
+                {
+                    let mut last = self.last_reauth.lock().await;
+                    *last = None;
+                }
+                anyhow::bail!("Re-authentication timed out")
+            }
+        }
     }
 
     async fn wait_for_airlock(&self) -> Result<()> {

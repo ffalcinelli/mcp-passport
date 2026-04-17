@@ -20,6 +20,7 @@ services:
       - "8081:8081"
     environment:
       - KEYCLOAK_URL=http://keycloak:8080
+      - EXTERNAL_KEYCLOAK_URL=http://localhost:8080
       - CLIENT_ID=mock-mcp
       - CLIENT_SECRET=mock-mcp-secret
     depends_on:

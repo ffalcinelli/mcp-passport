@@ -13,6 +13,7 @@ app = FastAPI()
 
 # Configuration
 KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://localhost:8080").rstrip("/")
+EXTERNAL_KEYCLOAK_URL = os.environ.get("EXTERNAL_KEYCLOAK_URL", KEYCLOAK_URL).rstrip("/")
 INTROSPECT_URL = f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token/introspect"
 CLIENT_ID = os.environ.get("CLIENT_ID", "mock-mcp")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "mock-mcp-secret")
@@ -108,13 +109,14 @@ async def verify_auth(request: Request, authorization: Optional[str] = Header(No
 @app.get("/.well-known/oauth-protected-resource")
 @app.get("/.well-known/openid-configuration")
 async def discovery(request: Request):
-    # This resource server tells the proxy to use Keycloak for authentication
+    # This resource server tells the proxy to use Keycloak for authentication.
+    # We use EXTERNAL_KEYCLOAK_URL so the client (host) can reach it.
     return {
-        "issuer": f"{KEYCLOAK_URL}/realms/mcp",
-        "authorization_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/auth",
-        "token_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token",
-        "pushed_authorization_request_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/ext/par/request",
-        "introspection_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token/introspect",
+        "issuer": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp",
+        "authorization_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/auth",
+        "token_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token",
+        "pushed_authorization_request_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/ext/par/request",
+        "introspection_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token/introspect",
         "dpop_signing_alg_values_supported": ["ES256"]
     }
 
