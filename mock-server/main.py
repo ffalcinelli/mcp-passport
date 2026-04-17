@@ -102,13 +102,15 @@ async def verify_auth(request: Request, authorization: Optional[str] = Header(No
         raise e
 
 @app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/openid-configuration")
 async def discovery(request: Request):
+    base = str(request.base_url).rstrip("/")
     return {
-        "issuer": f"{KEYCLOAK_URL}/realms/mcp",
-        "authorization_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/auth",
-        "token_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token",
-        "pushed_authorization_request_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/ext/par/request",
-        "introspection_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token/introspect",
+        "issuer": f"{base}/realms/mcp",
+        "authorization_endpoint": f"{base}/realms/mcp/protocol/openid-connect/auth",
+        "token_endpoint": f"{base}/realms/mcp/protocol/openid-connect/token",
+        "pushed_authorization_request_endpoint": f"{base}/realms/mcp/protocol/openid-connect/ext/par/request",
+        "introspection_endpoint": f"{base}/realms/mcp/protocol/openid-connect/token/introspect",
         "dpop_signing_alg_values_supported": ["ES256"]
     }
 

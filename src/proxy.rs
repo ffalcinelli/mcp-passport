@@ -142,125 +142,142 @@ impl Proxy {
 
     /// Primary entry point for stdio -> HTTP bridge
     pub async fn handle_request(self: Arc<Self>, payload: Value) -> Result<Value> {
-        self.wait_for_airlock().await?;
+        let mut retry_count = 0;
+        let max_retries = 2;
 
-        let token_opt = self.vault.get_token(&self.user_id)?;
+        loop {
+            if retry_count > max_retries {
+                error!("Maximum retry attempts reached for request. Aborting to prevent infinite loop.");
+                anyhow::bail!("Maximum retry attempts reached");
+            }
 
-        let response = if let Some(ref token) = token_opt {
-            let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
-                Some(bytes) => DpopKey::from_bytes(&bytes)?,
-                None => {
-                    info!("No DPoP key found for user, triggering re-authentication...");
-                    self.trigger_reauth(None, None, None).await?;
-                    return Box::pin(self.clone().handle_request(payload)).await;
+            self.wait_for_airlock().await?;
+
+            let token_opt = self.vault.get_token(&self.user_id)?;
+
+            let response = if let Some(ref token) = token_opt {
+                let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
+                    Some(bytes) => DpopKey::from_bytes(&bytes)?,
+                    None => {
+                        info!("No DPoP key found for user, triggering re-authentication...");
+                        self.trigger_reauth(None, None, None).await?;
+                        retry_count += 1;
+                        continue;
+                    }
+                };
+
+                let dpop_proof =
+                    dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
+
+                let auth_header = match self.auth_scheme {
+                    AuthScheme::Bearer => format!("Bearer {}", token),
+                    AuthScheme::Dpop => format!("DPoP {}", token),
+                };
+
+                let mut request = self
+                    .http_client
+                    .post(&self.remote_url)
+                    .header("Authorization", auth_header)
+                    .header("DPoP", dpop_proof)
+                    .header("MCP-Protocol-Version", &self.protocol_version);
+
+                let sid = {
+                    let sid_lock = self.session_id.lock().await;
+                    sid_lock.clone()
+                };
+
+                if let Some(s) = sid {
+                    request = request.header("MCP-Session-Id", s);
                 }
+
+                request.json(&payload).send().await?
+            } else {
+                // No token. Send unauthenticated request to trigger discovery via 401
+                info!(
+                    "No token found for user, sending unauthenticated request to trigger discovery..."
+                );
+                let mut request = self
+                    .http_client
+                    .post(&self.remote_url)
+                    .header("MCP-Protocol-Version", &self.protocol_version);
+
+                let sid = {
+                    let sid_lock = self.session_id.lock().await;
+                    sid_lock.clone()
+                };
+                if let Some(s) = sid {
+                    request = request.header("MCP-Session-Id", s);
+                }
+
+                request.json(&payload).send().await?
             };
 
-            let dpop_proof =
-                dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
+            if response.status() == StatusCode::UNAUTHORIZED {
+                warn!("401 Unauthorized received. Activating Airlock suspension...");
+                let challenge = WwwAuthenticate::parse(response.headers());
 
-            let auth_header = match self.auth_scheme {
-                AuthScheme::Bearer => format!("Bearer {}", token),
-                AuthScheme::Dpop => format!("DPoP {}", token),
-            };
-
-            let mut request = self
-                .http_client
-                .post(&self.remote_url)
-                .header("Authorization", auth_header)
-                .header("DPoP", dpop_proof)
-                .header("MCP-Protocol-Version", &self.protocol_version);
-
-            let sid = {
-                let sid_lock = self.session_id.lock().await;
-                sid_lock.clone()
-            };
-
-            if let Some(s) = sid {
-                request = request.header("MCP-Session-Id", s);
-            }
-
-            request.json(&payload).send().await?
-        } else {
-            // No token. Send unauthenticated request to trigger discovery via 401
-            info!(
-                "No token found for user, sending unauthenticated request to trigger discovery..."
-            );
-            let mut request = self
-                .http_client
-                .post(&self.remote_url)
-                .header("MCP-Protocol-Version", &self.protocol_version);
-
-            let sid = {
-                let sid_lock = self.session_id.lock().await;
-                sid_lock.clone()
-            };
-            if let Some(s) = sid {
-                request = request.header("MCP-Session-Id", s);
-            }
-
-            request.json(&payload).send().await?
-        };
-
-        if response.status() == StatusCode::UNAUTHORIZED {
-            warn!("401 Unauthorized received. Activating Airlock suspension...");
-            let challenge = WwwAuthenticate::parse(response.headers());
-
-            let metadata_url = challenge.resource_metadata.or_else(|| {
-                // Fallback to well-known at root if header is missing
-                info!("WWW-Authenticate missing resource_metadata, falling back to root well-known...");
-                Url::parse(&self.remote_url).ok().and_then(|u| {
-                    u.join("/.well-known/oauth-protected-resource").ok().map(|url| url.to_string())
-                })
-            });
-
-            self.trigger_reauth(
-                token_opt.as_deref(),
-                metadata_url.as_deref(),
-                challenge.scope,
-            )
-            .await?;
-
-            // Retry the request after re-authentication
-            return Box::pin(self.clone().handle_request(payload)).await;
-        }
-
-        if response.status() == StatusCode::FORBIDDEN {
-            let challenge = WwwAuthenticate::parse(response.headers());
-            if challenge.error.as_deref() == Some("insufficient_scope") {
-                warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
-                
                 let metadata_url = challenge.resource_metadata.or_else(|| {
+                    // Fallback to well-known at root if header is missing
+                    info!("WWW-Authenticate missing resource_metadata, falling back to root well-known...");
                     Url::parse(&self.remote_url).ok().and_then(|u| {
-                        u.join("/.well-known/oauth-protected-resource").ok().map(|url| url.to_string())
+                        u.join("/.well-known/oauth-protected-resource")
+                            .ok()
+                            .map(|url| url.to_string())
                     })
                 });
 
-                self.trigger_reauth(token_opt.as_deref(), metadata_url.as_deref(), challenge.scope)
-                    .await?;
-                return Box::pin(self.clone().handle_request(payload)).await;
+                self.trigger_reauth(
+                    token_opt.as_deref(),
+                    metadata_url.as_deref(),
+                    challenge.scope,
+                )
+                .await?;
+
+                // Retry the request after re-authentication
+                retry_count += 1;
+                continue;
             }
-        }
 
-        // Capture Session ID if returned
-        if let Some(sid) = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|h| h.to_str().ok())
-        {
-            let mut sid_lock = self.session_id.lock().await;
-            if sid_lock.as_ref().map(|s| s.as_str()) != Some(sid) {
-                info!("New MCP Session ID captured: {}", sid);
-                *sid_lock = Some(sid.to_string());
+            if response.status() == StatusCode::FORBIDDEN {
+                let challenge = WwwAuthenticate::parse(response.headers());
+                if challenge.error.as_deref() == Some("insufficient_scope") {
+                    warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
+
+                    let metadata_url = challenge.resource_metadata.or_else(|| {
+                        Url::parse(&self.remote_url).ok().and_then(|u| {
+                            u.join("/.well-known/oauth-protected-resource")
+                                .ok()
+                                .map(|url| url.to_string())
+                        })
+                    });
+
+                    self.trigger_reauth(token_opt.as_deref(), metadata_url.as_deref(), challenge.scope)
+                        .await?;
+                    retry_count += 1;
+                    continue;
+                }
             }
-        }
 
-        if response.status() == StatusCode::NO_CONTENT {
-            return Ok(Value::Null);
-        }
+            // Capture Session ID if returned
+            if let Some(sid) = response
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|h| h.to_str().ok())
+            {
+                let mut sid_lock = self.session_id.lock().await;
+                if sid_lock.as_ref().map(|s| s.as_str()) != Some(sid) {
+                    info!("New MCP Session ID captured: {}", sid);
+                    *sid_lock = Some(sid.to_string());
+                }
+            }
 
-        let body = response.json::<Value>().await?;
-        Ok(body)
+            if response.status() == StatusCode::NO_CONTENT {
+                return Ok(Value::Null);
+            }
+
+            let body = response.json::<Value>().await?;
+            return Ok(body);
+        }
     }
 
     async fn trigger_reauth(
@@ -316,7 +333,20 @@ impl Proxy {
             let _ = self.vault.delete_token(&self.user_id);
         }
 
-        let auth_manager = self.ensure_auth_manager(metadata_url).await?;
+        let auth_manager_res = self.ensure_auth_manager(metadata_url).await;
+        
+        let auth_manager = match auth_manager_res {
+            Ok(am) => am,
+            Err(e) => {
+                error!("Failed to ensure AuthManager: {:?}", e);
+                let _ = self.suspension_tx.send(false);
+                {
+                    let mut last = self.last_reauth.lock().await;
+                    *last = None;
+                }
+                return Err(e);
+            }
+        };
 
         if let Err(e) = auth_manager
             .reauthenticate(&self.user_id, scopes, None)
@@ -324,6 +354,13 @@ impl Proxy {
         {
             error!("Re-authentication failed: {:?}", e);
             let _ = self.suspension_tx.send(false);
+            
+            // Reset last_reauth on failure to allow immediate retry after configuration fixes
+            {
+                let mut last = self.last_reauth.lock().await;
+                *last = None;
+            }
+            
             return Err(e);
         }
 

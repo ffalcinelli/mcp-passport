@@ -90,9 +90,9 @@ impl AuthManager {
 
         let (auth_url, token_url, par_url) = if let Some(url) = discovery_url {
             info!("Fetching OIDC discovery from {}...", url);
-            let resp = http_client.get(url).send().await?;
+            let resp = http_client.get(url.clone()).send().await?;
             if !resp.status().is_success() {
-                anyhow::bail!("Failed to fetch discovery document: {}", resp.status());
+                anyhow::bail!("Failed to fetch discovery document from {}: {}", url, resp.status());
             }
             let doc: DiscoveryDocument = resp.json().await?;
 
