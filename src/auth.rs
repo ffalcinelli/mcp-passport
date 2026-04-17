@@ -264,7 +264,10 @@ impl AuthManager {
 
         if !skip_open && !has_listener {
             if let Err(e) = open::that(&auth_url) {
-                warn!("Failed to open browser automatically: {}. Please copy the URL above.", e);
+                warn!(
+                    "Failed to open browser automatically: {}. Please copy the URL above.",
+                    e
+                );
             }
         } else {
             info!("Skipping automatic browser open (internal listener or skip flag present).");
