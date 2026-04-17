@@ -131,6 +131,7 @@ impl Proxy {
             self.oidc_config.internal_callback_tx.clone(),
         ).await?;
 
+
         let am_shared = Arc::new(am);
         *lock = Some((*am_shared).clone());
         Ok(am_shared)

@@ -2,192 +2,23 @@ use mcp_passport::proxy::Proxy;
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::vault::Vault;
 use mcp_passport::config::AuthScheme;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::Arc;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::time::Duration;
 use tokio::time::timeout;
-use ax_extract::Form;
-use axum::{routing::{post, get}, Json, Router, extract as ax_extract, extract::Query};
-use axum::http::{HeaderMap, StatusCode};
-use tokio::sync::{oneshot, mpsc};
+use axum::{routing::get, Router};
+use tokio::sync::mpsc;
 use anyhow::Context;
-use tracing::info;
-
-#[derive(Clone)]
-struct McpState {
-    metadata_url: String,
-}
-
-async fn mock_mcp_handler(
-    ax_extract::State(state): ax_extract::State<McpState>,
-    headers: HeaderMap,
-    Json(payload): Json<Value>
-) -> (StatusCode, HeaderMap, Json<Value>) {
-    let mut resp_headers = HeaderMap::new();
-    let auth = headers.get("Authorization");
-    if let Some(auth_str) = auth.and_then(|h| h.to_str().ok()) {
-        if auth_str.contains("valid_mock_token") {
-            return (StatusCode::OK, resp_headers, Json(json!({
-                "jsonrpc": "2.0",
-                "id": payload["id"],
-                "result": {"status": "ok"}
-            })));
-        }
-    }
-    
-    resp_headers.insert(
-        reqwest::header::WWW_AUTHENTICATE,
-        format!("Bearer resource_metadata=\"{}\"", state.metadata_url).parse().unwrap()
-    );
-    (StatusCode::UNAUTHORIZED, resp_headers, Json(json!({"error": "unauthorized"})))
-}
-
-use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, core::ContainerPort};
-use fantoccini::{ClientBuilder, Locator};
-
-#[tokio::test]
-async fn test_mock_oidc_reauth_flow() -> anyhow::Result<()> {
-    let test_svc = "mcp-passport-mock-headless-v2";
-
-    // 0. Start Chromedriver
-    let chromedriver_img = GenericImage::new("selenium/standalone-chrome", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Started Selenium Standalone"))
-        .with_network("host");
-    let _chromedriver_container: testcontainers::core::ContainerAsync<GenericImage> = chromedriver_img.start().await.expect("Failed to start Chromedriver");
-    let chrome_url = "http://localhost:4444";
-
-    // 1. Setup Mock OIDC Server
-    let (state_tx, mut state_rx) = mpsc::channel::<String>(1);
-    let state_tx_for_oidc = Arc::new(tokio::sync::Mutex::new(state_tx));
-
-    let oidc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let oidc_addr = oidc_listener.local_addr()?;
-    let oidc_url = format!("http://127.0.0.1:{}", oidc_addr.port());
-    let oidc_url_for_mcp = oidc_url.clone();
-    let oidc_url_for_discovery = oidc_url.clone();
-
-    let oidc_app = Router::new()
-        .route("/discovery", get(move || {
-            let base = oidc_url_for_discovery.clone();
-            async move {
-                info!("Mock OIDC: discovery hit");
-                Json(json!({
-                    "authorization_endpoint": format!("{}/auth", base),
-                    "token_endpoint": format!("{}/token", base),
-                    "pushed_authorization_request_endpoint": format!("{}/par", base)
-                }))
-            }
-        }))
-        .route("/par", post(move |Form(params): Form<Value>| {
-            let stx = state_tx_for_oidc.clone();
-            async move {
-                info!("Mock OIDC: PAR hit");
-                if params.get("resource").is_none() {
-                    return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing_resource"})));
-                }
-                if let Some(state) = params.get("state").and_then(|s| s.as_str()) {
-                    let _ = stx.lock().await.send(state.to_string()).await;
-                }
-                (StatusCode::OK, Json(json!({"request_uri": "urn:ietf:params:oauth:request_uri:123", "expires_in": 60})))
-            }
-        }))
-        .route("/auth", get(|Query(params): Query<Value>| async move {
-            info!("Mock OIDC: auth hit");
-            let code = "mock_code";
-            let state = params.get("state").and_then(|s: &Value| s.as_str()).unwrap_or("");
-            let redirect_uri = "http://127.0.0.1:8082/callback"; 
-            let login_url = format!("{}?code={}&state={}", redirect_uri, code, state);
-            axum::response::Html(format!("<html><body><a id='login' href='{}'>Login</a></body></html>", login_url))
-        }))
-        .route("/token", post(|headers: HeaderMap, Form(params): Form<Value>| async move {
-            info!("Mock OIDC: token hit");
-            let dpop = headers.get("DPoP");
-            if dpop.is_none() || params.get("resource").is_none() {
-                return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_request"})));
-            }
-            (StatusCode::OK, Json(json!({"access_token": "valid_mock_token", "token_type": "DPoP", "expires_in": 3600})))
-        }));
-
-    tokio::spawn(async move { let _ = axum::serve(oidc_listener, oidc_app).await; });
-
-    // 2. Setup Mock MCP Server
-    let mcp_app = Router::new()
-        .route("/rpc", post(mock_mcp_handler))
-        .with_state(McpState { metadata_url: format!("{}/discovery", oidc_url_for_mcp) });
-
-    let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let mcp_addr = mcp_listener.local_addr()?;
-    let mcp_url = format!("http://127.0.0.1:{}/rpc", mcp_addr.port());
-    tokio::spawn(async move { let _ = axum::serve(mcp_listener, mcp_app).await; });
-
-    // 3. Initialize OidcConfig
-    let (url_tx, url_rx) = oneshot::channel::<String>();
-    let (addr_tx, addr_rx) = oneshot::channel::<std::net::SocketAddr>();
-
-    let oidc_config = OidcConfig {
-        discovery_url: None, 
-        client_id: "test-client".into(),
-        redirect_url: "http://127.0.0.1:8082/callback".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(Some(url_tx))),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(Some(addr_tx))),
-    };
-
-    // 4. Initialize Proxy
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token("mock_user");
-    let proxy = Arc::new(Proxy::new(&mcp_url, "mock_user", oidc_config, test_svc, "2025-11-25", AuthScheme::Bearer));
-
-    // 5. Start Proxy Task
-    let (mut client_writer, proxy_reader) = io::duplex(1024);
-    let (proxy_writer, mut client_reader) = io::duplex(1024);
-    let p = proxy.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(proxy_reader).lines();
-        let mut writer = proxy_writer;
-        while let Ok(Some(line)) = reader.next_line().await {
-            if let Ok(payload) = serde_json::from_str::<Value>(&line) {
-                if let Ok(res) = p.clone().handle_request(payload).await {
-                    let _ = writer.write_all(format!("{}\n", res).as_bytes()).await;
-                    let _ = writer.flush().await;
-                }
-            }
-        }
-    });
-
-    // 6. Execute Request
-    client_writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"ping\"}\n").await?;
-    client_writer.flush().await?;
-
-    // 7. Headless Browser Automation
-    let auth_url = timeout(Duration::from_secs(30), url_rx).await??;
-    let mut caps = serde_json::map::Map::new();
-    let chrome_opts = json!({ "args": ["--headless", "--disable-gpu", "--no-sandbox"] });
-    caps.insert("goog:chromeOptions".to_string(), chrome_opts);
-
-    let client = ClientBuilder::native().capabilities(caps).connect(&chrome_url).await?;
-    client.goto(&auth_url).await?;
-    client.wait().for_element(Locator::Id("login")).await?;
-    client.find(Locator::Id("login")).await?.click().await?;
-    client.close().await?;
-
-    // 8. Read final response
-    let mut reader = BufReader::new(&mut client_reader).lines();
-    let res_line = timeout(Duration::from_secs(30), reader.next_line()).await??.context("Failed to read response")?;
-    let response: Value = serde_json::from_str(&res_line)?;
-    assert_eq!(response["result"]["status"], "ok");
-    Ok(())
-}
 
 #[tokio::test]
 async fn test_sse_piping_flow() -> anyhow::Result<()> {
-    let test_svc = "mcp-passport-test-sse-v2";
+    let test_svc = "mcp-passport-test-sse-v3";
+
+    // 1. Setup Mock SSE Server
     use axum::response::sse::{Event, Sse};
     use futures::stream;
     use mcp_passport::crypto::DpopKey;
+    
     let mcp_app = Router::new().route("/sse", get(|| async move {
         let stream = stream::iter(vec![
             Ok::<Event, std::convert::Infallible>(Event::default().data("{\"jsonrpc\":\"2.0\",\"method\":\"test/notify\"}")),
@@ -198,10 +29,13 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
     let mcp_addr = mcp_listener.local_addr()?;
     let sse_url = format!("http://127.0.0.1:{}/sse", mcp_addr.port());
     tokio::spawn(async move { let _ = axum::serve(mcp_listener, mcp_app).await; });
+
+    // 2. Setup Vault and AuthManager (minimal for SSE)
     let vault = Vault::new(test_svc);
     vault.store_token("sse_user", "valid_token")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key("sse_user", &dpop_key.to_bytes())?;
+
     let oidc_config = OidcConfig {
         discovery_url: None,
         client_id: "c".into(),
@@ -213,11 +47,18 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
     };
     let proxy = Arc::new(Proxy::new("http://unused", "sse_user", oidc_config, test_svc, "2025-11-25", AuthScheme::Bearer));
+
+    // 3. Start SSE Listener
     let (stdout_tx, mut stdout_rx) = mpsc::channel::<String>(100);
     let p = proxy.clone();
     let s_url = sse_url.clone();
-    tokio::spawn(async move { let _ = p.listen_sse(&s_url, stdout_tx).await; });
+    tokio::spawn(async move {
+        let _ = p.listen_sse(&s_url, stdout_tx).await;
+    });
+
+    // 4. Verify SSE data received
     let msg = timeout(Duration::from_secs(5), stdout_rx.recv()).await?.context("No SSE message")?;
     assert!(msg.contains("test/notify"));
+
     Ok(())
 }

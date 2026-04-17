@@ -28,6 +28,8 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    env:
+      MCP_PASSPORT_USE_MEMORY_VAULT: 1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
@@ -44,6 +46,8 @@ jobs:
   audit:
     name: Audit
     runs-on: ubuntu-latest
+    env:
+      MCP_PASSPORT_USE_MEMORY_VAULT: 1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
@@ -60,6 +64,8 @@ jobs:
   test:
     name: Test & Coverage
     runs-on: ubuntu-latest
+    env:
+      MCP_PASSPORT_USE_MEMORY_VAULT: 1
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
       - uses: dtolnay/rust-toolchain@stable
