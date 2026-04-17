@@ -47,6 +47,10 @@ async fn mock_mcp_handler(headers: HeaderMap, Json(payload): Json<Value>) -> Jso
 
 #[tokio::test]
 async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
+    // Ensure we use the memory vault and skip browser for reliability in all environments
+    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+    std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
+
     // 1. Setup tracing
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")

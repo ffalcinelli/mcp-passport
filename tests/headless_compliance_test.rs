@@ -71,6 +71,10 @@ struct OidcState {
 
 #[tokio::test]
 async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
+    // Ensure we use the memory vault and skip browser for reliability in all environments
+    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+    std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
+
     // 0. Setup tracing
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
