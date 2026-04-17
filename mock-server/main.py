@@ -90,7 +90,27 @@ async def verify_auth(request: Request, authorization: Optional[str] = Header(No
 
     # 2. Validate DPoP proof and 'ath' claim
     url = str(request.url)
-    validate_dpop_proof(dpop, request.method, url, access_token)
+    try:
+        validate_dpop_proof(dpop, request.method, url, access_token)
+    except HTTPException as e:
+        if e.status_code == 401:
+            # Return WWW-Authenticate with resource_metadata for discovery
+            headers = {
+                "WWW-Authenticate": f'DPoP error="invalid_token", resource_metadata="{request.base_url}.well-known/oauth-protected-resource"'
+            }
+            raise HTTPException(status_code=401, detail=e.detail, headers=headers)
+        raise e
+
+@app.get("/.well-known/oauth-protected-resource")
+async def discovery(request: Request):
+    return {
+        "issuer": f"{KEYCLOAK_URL}/realms/mcp",
+        "authorization_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/auth",
+        "token_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token",
+        "pushed_authorization_request_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/ext/par/request",
+        "introspection_endpoint": f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token/introspect",
+        "dpop_signing_alg_values_supported": ["ES256"]
+    }
 
 @app.post("/rpc", dependencies=[Depends(verify_auth)])
 async def handle_rpc(request: Request):

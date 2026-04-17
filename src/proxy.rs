@@ -7,6 +7,7 @@ use anyhow::Context;
 use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
+use url::Url;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
@@ -62,13 +63,15 @@ fn extract_param(header: &str, param: &str) -> Option<String> {
     if let Some(start) = header.find(&needle) {
         let val_start = start + needle.len();
         let remainder = &header[val_start..];
-        if let Some(stripped) = remainder.strip_prefix('"') {
+        if remainder.starts_with('"') {
+            let stripped = &remainder[1..];
             if let Some(end) = stripped.find('"') {
                 return Some(stripped[..end].to_string());
             }
         } else {
+            // Unquoted: take until comma or end of string
             let end = remainder.find(',').unwrap_or(remainder.len());
-            return Some(remainder[..end].to_string());
+            return Some(remainder[..end].trim().to_string());
         }
     }
     None
@@ -204,12 +207,11 @@ impl Proxy {
             let challenge = WwwAuthenticate::parse(response.headers());
 
             let metadata_url = challenge.resource_metadata.or_else(|| {
-                // Fallback to well-known if header is missing
-                info!("WWW-Authenticate missing resource_metadata, falling back to well-known...");
-                Some(format!(
-                    "{}/.well-known/oauth-protected-resource",
-                    self.remote_url.trim_end_matches('/')
-                ))
+                // Fallback to well-known at root if header is missing
+                info!("WWW-Authenticate missing resource_metadata, falling back to root well-known...");
+                Url::parse(&self.remote_url).ok().and_then(|u| {
+                    u.join("/.well-known/oauth-protected-resource").ok().map(|url| url.to_string())
+                })
             });
 
             self.trigger_reauth(
@@ -227,7 +229,14 @@ impl Proxy {
             let challenge = WwwAuthenticate::parse(response.headers());
             if challenge.error.as_deref() == Some("insufficient_scope") {
                 warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
-                self.trigger_reauth(token_opt.as_deref(), None, challenge.scope)
+                
+                let metadata_url = challenge.resource_metadata.or_else(|| {
+                    Url::parse(&self.remote_url).ok().and_then(|u| {
+                        u.join("/.well-known/oauth-protected-resource").ok().map(|url| url.to_string())
+                    })
+                });
+
+                self.trigger_reauth(token_opt.as_deref(), metadata_url.as_deref(), challenge.scope)
                     .await?;
                 return Box::pin(self.clone().handle_request(payload)).await;
             }
@@ -401,10 +410,9 @@ impl Proxy {
 
                             let challenge = WwwAuthenticate::parse(resp.headers());
                             let metadata_url = challenge.resource_metadata.or_else(|| {
-                                Some(format!(
-                                    "{}/.well-known/oauth-protected-resource",
-                                    self.remote_url.trim_end_matches('/')
-                                ))
+                                Url::parse(&self.remote_url).ok().and_then(|u| {
+                                    u.join("/.well-known/oauth-protected-resource").ok().map(|url| url.to_string())
+                                })
                             });
 
                             let failing_token = self.vault.get_token(&self.user_id)?;
@@ -435,5 +443,64 @@ impl Proxy {
             warn!("SSE connection lost, retrying in 5 seconds...");
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
+
+    #[test]
+    fn test_www_authenticate_parse_quoted() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static(
+                "DPoP resource_metadata=\"http://example.com/.well-known/oauth-protected-resource\", scope=\"mcp:all\"",
+            ),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(
+            challenge.resource_metadata,
+            Some("http://example.com/.well-known/oauth-protected-resource".to_string())
+        );
+        assert_eq!(challenge.scope, Some(vec!["mcp:all".to_string()]));
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_unquoted() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static(
+                "DPoP resource_metadata=http://example.com/.well-known/oauth-protected-resource, scope=mcp:all",
+            ),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(
+            challenge.resource_metadata,
+            Some("http://example.com/.well-known/oauth-protected-resource".to_string())
+        );
+        assert_eq!(challenge.scope, Some(vec!["mcp:all".to_string()]));
+    }
+
+    #[test]
+    fn test_url_joining_behavior() {
+        let remote_url = "http://localhost:8081/rpc";
+        let u = Url::parse(remote_url).unwrap();
+        let joined = u.join("/.well-known/oauth-protected-resource").unwrap();
+        assert_eq!(
+            joined.as_str(),
+            "http://localhost:8081/.well-known/oauth-protected-resource"
+        );
+
+        let remote_url_no_path = "http://localhost:8081";
+        let u = Url::parse(remote_url_no_path).unwrap();
+        let joined = u.join("/.well-known/oauth-protected-resource").unwrap();
+        assert_eq!(
+            joined.as_str(),
+            "http://localhost:8081/.well-known/oauth-protected-resource"
+        );
     }
 }
