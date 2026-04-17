@@ -35,11 +35,19 @@ pub struct Config {
     pub kc_par_url: Option<String>,
 
     /// OIDC Client ID
-    #[arg(long, env = "MCP_PASSPORT_OIDC_CLIENT_ID", default_value = "mcp-passport")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_CLIENT_ID",
+        default_value = "mcp-passport"
+    )]
     pub oidc_client_id: String,
 
     /// Local Loopback Redirect URL for OIDC
-    #[arg(long, env = "MCP_PASSPORT_OIDC_REDIRECT_URL", default_value = "http://127.0.0.1:8082/callback")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_REDIRECT_URL",
+        default_value = "http://127.0.0.1:8082/callback"
+    )]
     pub oidc_redirect_url: String,
 
     /// User ID for vault storage
@@ -51,7 +59,11 @@ pub struct Config {
     pub log_level: String,
 
     /// MCP Protocol Version to include in headers
-    #[arg(long, env = "MCP_PASSPORT_MCP_PROTOCOL_VERSION", default_value = "2025-11-25")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_MCP_PROTOCOL_VERSION",
+        default_value = "2025-11-25"
+    )]
     pub mcp_protocol_version: String,
 
     /// Authorization header scheme (bearer or dpop)
@@ -73,13 +85,19 @@ mod tests {
     fn test_config_parsing_minimal() {
         let args = vec![
             "mcp-passport",
-            "--remote-mcp-url", "http://mcp/rpc",
-            "--remote-sse-url", "http://mcp/sse",
-            "--oidc-discovery-url", "http://kc/discovery",
+            "--remote-mcp-url",
+            "http://mcp/rpc",
+            "--remote-sse-url",
+            "http://mcp/sse",
+            "--oidc-discovery-url",
+            "http://kc/discovery",
         ];
         let config = Config::try_parse_from(args).unwrap();
         assert_eq!(config.remote_mcp_url, "http://mcp/rpc");
-        assert_eq!(config.oidc_discovery_url, Some("http://kc/discovery".to_string()));
+        assert_eq!(
+            config.oidc_discovery_url,
+            Some("http://kc/discovery".to_string())
+        );
         assert_eq!(config.oidc_client_id, "mcp-passport");
         assert_eq!(config.user_id, "default_user");
         assert_eq!(config.mcp_protocol_version, "2025-11-25");
@@ -89,14 +107,22 @@ mod tests {
     fn test_config_parsing_full() {
         let args = vec![
             "mcp-passport",
-            "--remote-mcp-url", "http://mcp/rpc",
-            "--remote-sse-url", "http://mcp/sse",
-            "--kc-auth-url", "http://kc/auth",
-            "--kc-token-url", "http://kc/token",
-            "--kc-par-url", "http://kc/par",
-            "--oidc-client-id", "custom-client",
-            "--user-id", "custom-user",
-            "--oidc-redirect-url", "http://localhost:9999/cb",
+            "--remote-mcp-url",
+            "http://mcp/rpc",
+            "--remote-sse-url",
+            "http://mcp/sse",
+            "--kc-auth-url",
+            "http://kc/auth",
+            "--kc-token-url",
+            "http://kc/token",
+            "--kc-par-url",
+            "http://kc/par",
+            "--oidc-client-id",
+            "custom-client",
+            "--user-id",
+            "custom-user",
+            "--oidc-redirect-url",
+            "http://localhost:9999/cb",
         ];
         let config = Config::try_parse_from(args).unwrap();
         assert_eq!(config.oidc_client_id, "custom-client");

@@ -1,14 +1,14 @@
-use p256::ecdsa::{SigningKey, VerifyingKey, signature::Signer};
-use p256::SecretKey;
-use rand_core::OsRng;
-use serde::{Serialize, Deserialize};
-use serde_json::{json, Value};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use uuid::Uuid;
-use std::time::{SystemTime, UNIX_EPOCH};
 use crate::Result;
 use anyhow::Context;
-use sha2::{Sha256, Digest};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use p256::ecdsa::{signature::Signer, SigningKey, VerifyingKey};
+use p256::SecretKey;
+use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 pub struct DpopKey {
     signing_key: SigningKey,
@@ -47,7 +47,7 @@ impl DpopKey {
     pub fn public_jwk(&self) -> Value {
         let verifying_key = VerifyingKey::from(&self.signing_key);
         let encoded_point = verifying_key.to_encoded_point(false);
-        
+
         json!({
             "kty": "EC",
             "crv": "P-256",
@@ -62,9 +62,14 @@ impl DpopKey {
         self.generate_proof_with_ath(htm, htu, None)
     }
 
-    pub fn generate_proof_with_ath(&self, htm: &str, htu: &str, access_token: Option<&str>) -> Result<String> {
+    pub fn generate_proof_with_ath(
+        &self,
+        htm: &str,
+        htu: &str,
+        access_token: Option<&str>,
+    ) -> Result<String> {
         let jwk = self.public_jwk();
-        
+
         let header = json!({
             "typ": "dpop+jwt",
             "alg": "ES256",
@@ -72,7 +77,7 @@ impl DpopKey {
         });
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        
+
         let ath = access_token.map(|at| {
             let mut hasher = Sha256::new();
             hasher.update(at.as_bytes());
@@ -89,7 +94,7 @@ impl DpopKey {
 
         let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_string(&header)?);
         let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims)?);
-        
+
         let message = format!("{}.{}", header_b64, payload_b64);
         let signature: p256::ecdsa::Signature = self.signing_key.sign(message.as_bytes());
         let signature_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
@@ -147,12 +152,13 @@ mod tests {
     fn test_generate_proof_with_ath() -> Result<()> {
         let key = DpopKey::generate();
         let access_token = "test_token";
-        let proof = key.generate_proof_with_ath("GET", "https://api.example.com/sse", Some(access_token))?;
+        let proof =
+            key.generate_proof_with_ath("GET", "https://api.example.com/sse", Some(access_token))?;
         let parts: Vec<&str> = proof.split('.').collect();
-        
+
         let claims_json: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
         assert!(claims_json.get("ath").is_some());
-        
+
         let mut hasher = Sha256::new();
         hasher.update(access_token.as_bytes());
         let expected_ath = URL_SAFE_NO_PAD.encode(hasher.finalize());

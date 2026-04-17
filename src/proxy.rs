@@ -1,14 +1,14 @@
-use crate::Result;
-use crate::crypto::DpopKey;
-use crate::vault::Vault;
 use crate::auth::{AuthManager, OidcConfig};
 use crate::config::AuthScheme;
-use reqwest::{Client, StatusCode, header::HeaderMap};
+use crate::crypto::DpopKey;
+use crate::vault::Vault;
+use crate::Result;
+use anyhow::Context;
+use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde_json::Value;
-use tracing::{info, warn, error, debug};
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
-use anyhow::Context;
+use tracing::{debug, error, info, warn};
 
 pub struct Proxy {
     http_client: Client,
@@ -36,9 +36,12 @@ struct WwwAuthenticate {
 impl WwwAuthenticate {
     fn parse(headers: &HeaderMap) -> Self {
         let mut result = Self::default();
-        if let Some(auth_val) = headers.get(reqwest::header::WWW_AUTHENTICATE).and_then(|h| h.to_str().ok()) {
+        if let Some(auth_val) = headers
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|h| h.to_str().ok())
+        {
             debug!("Parsing WWW-Authenticate: {}", auth_val);
-            
+
             // Basic parsing for resource_metadata and scope
             if let Some(rm) = extract_param(auth_val, "resource_metadata") {
                 result.resource_metadata = Some(rm);
@@ -116,15 +119,18 @@ impl Proxy {
             .map(|s| s.to_string())
             .or_else(|| self.oidc_config.discovery_url.clone());
 
-        info!("Performing dynamic discovery for AuthManager (url: {:?})...", discovery_url);
-        
+        info!(
+            "Performing dynamic discovery for AuthManager (url: {:?})...",
+            discovery_url
+        );
+
         let am = AuthManager::discover(
             self.oidc_config.clone(),
             self.remote_url.clone(), // This is the 'resource'
             &self.vault.service,
             metadata_url,
-        ).await?;
-
+        )
+        .await?;
 
         let am_shared = Arc::new(am);
         *lock = Some((*am_shared).clone());
@@ -136,7 +142,7 @@ impl Proxy {
         self.wait_for_airlock().await?;
 
         let token_opt = self.vault.get_token(&self.user_id)?;
-        
+
         let response = if let Some(ref token) = token_opt {
             let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
                 Some(bytes) => DpopKey::from_bytes(&bytes)?,
@@ -146,15 +152,17 @@ impl Proxy {
                     return Box::pin(self.clone().handle_request(payload)).await;
                 }
             };
-            
-            let dpop_proof = dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
+
+            let dpop_proof =
+                dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
 
             let auth_header = match self.auth_scheme {
                 AuthScheme::Bearer => format!("Bearer {}", token),
                 AuthScheme::Dpop => format!("DPoP {}", token),
             };
 
-            let mut request = self.http_client
+            let mut request = self
+                .http_client
                 .post(&self.remote_url)
                 .header("Authorization", auth_header)
                 .header("DPoP", dpop_proof)
@@ -164,7 +172,7 @@ impl Proxy {
                 let sid_lock = self.session_id.lock().await;
                 sid_lock.clone()
             };
-            
+
             if let Some(s) = sid {
                 request = request.header("MCP-Session-Id", s);
             }
@@ -172,11 +180,14 @@ impl Proxy {
             request.json(&payload).send().await?
         } else {
             // No token. Send unauthenticated request to trigger discovery via 401
-            info!("No token found for user, sending unauthenticated request to trigger discovery...");
-            let mut request = self.http_client
+            info!(
+                "No token found for user, sending unauthenticated request to trigger discovery..."
+            );
+            let mut request = self
+                .http_client
                 .post(&self.remote_url)
                 .header("MCP-Protocol-Version", &self.protocol_version);
-            
+
             let sid = {
                 let sid_lock = self.session_id.lock().await;
                 sid_lock.clone()
@@ -191,14 +202,22 @@ impl Proxy {
         if response.status() == StatusCode::UNAUTHORIZED {
             warn!("401 Unauthorized received. Activating Airlock suspension...");
             let challenge = WwwAuthenticate::parse(response.headers());
-            
+
             let metadata_url = challenge.resource_metadata.or_else(|| {
                 // Fallback to well-known if header is missing
                 info!("WWW-Authenticate missing resource_metadata, falling back to well-known...");
-                Some(format!("{}/.well-known/oauth-protected-resource", self.remote_url.trim_end_matches('/')))
+                Some(format!(
+                    "{}/.well-known/oauth-protected-resource",
+                    self.remote_url.trim_end_matches('/')
+                ))
             });
 
-            self.trigger_reauth(token_opt.as_deref(), metadata_url.as_deref(), challenge.scope).await?;
+            self.trigger_reauth(
+                token_opt.as_deref(),
+                metadata_url.as_deref(),
+                challenge.scope,
+            )
+            .await?;
 
             // Retry the request after re-authentication
             return Box::pin(self.clone().handle_request(payload)).await;
@@ -208,13 +227,18 @@ impl Proxy {
             let challenge = WwwAuthenticate::parse(response.headers());
             if challenge.error.as_deref() == Some("insufficient_scope") {
                 warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
-                self.trigger_reauth(token_opt.as_deref(), None, challenge.scope).await?;
+                self.trigger_reauth(token_opt.as_deref(), None, challenge.scope)
+                    .await?;
                 return Box::pin(self.clone().handle_request(payload)).await;
             }
         }
 
         // Capture Session ID if returned
-        if let Some(sid) = response.headers().get("mcp-session-id").and_then(|h| h.to_str().ok()) {
+        if let Some(sid) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|h| h.to_str().ok())
+        {
             let mut sid_lock = self.session_id.lock().await;
             if sid_lock.as_ref().map(|s| s.as_str()) != Some(sid) {
                 info!("New MCP Session ID captured: {}", sid);
@@ -230,9 +254,14 @@ impl Proxy {
         Ok(body)
     }
 
-    async fn trigger_reauth(&self, failing_token: Option<&str>, metadata_url: Option<&str>, scopes: Option<Vec<String>>) -> Result<()> {
+    async fn trigger_reauth(
+        &self,
+        failing_token: Option<&str>,
+        metadata_url: Option<&str>,
+        scopes: Option<Vec<String>>,
+    ) -> Result<()> {
         let _guard = self.reauth_mutex.lock().await;
-        
+
         // If airlock is already active, someone else is handling it.
         // Wait for it to clear and then return.
         if *self.suspension_rx.borrow() {
@@ -260,7 +289,9 @@ impl Proxy {
         let current_token = self.vault.get_token(&self.user_id)?;
         if let (Some(failing), Some(current)) = (failing_token, current_token.as_deref()) {
             if failing != current && scopes.is_none() {
-                info!("Token has already been updated by another task. Skipping redundant re-auth.");
+                info!(
+                    "Token has already been updated by another task. Skipping redundant re-auth."
+                );
                 return Ok(());
             }
         } else if failing_token.is_none() && current_token.is_some() && scopes.is_none() {
@@ -270,7 +301,7 @@ impl Proxy {
 
         let _ = self.suspension_tx.send(true);
         info!("Airlock activated. Performing re-authentication...");
-        
+
         // Clear invalid token from vault to avoid re-using it (only if not a step-up scope request)
         if scopes.is_none() {
             let _ = self.vault.delete_token(&self.user_id);
@@ -278,12 +309,15 @@ impl Proxy {
 
         let auth_manager = self.ensure_auth_manager(metadata_url).await?;
 
-        if let Err(e) = auth_manager.reauthenticate(&self.user_id, scopes, None).await {
+        if let Err(e) = auth_manager
+            .reauthenticate(&self.user_id, scopes, None)
+            .await
+        {
             error!("Re-authentication failed: {:?}", e);
             let _ = self.suspension_tx.send(false);
             return Err(e);
         }
-        
+
         info!("Re-authentication successful. Deactivating Airlock...");
         let _ = self.suspension_tx.send(false);
         Ok(())
@@ -298,9 +332,13 @@ impl Proxy {
     }
 
     /// Handles SSE events from the server and pipes them back to stdio
-    pub async fn listen_sse(&self, sse_url: &str, stdout_tx: tokio::sync::mpsc::Sender<String>) -> Result<()> {
-        use reqwest_eventsource::EventSource;
+    pub async fn listen_sse(
+        &self,
+        sse_url: &str,
+        stdout_tx: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<()> {
         use futures::StreamExt;
+        use reqwest_eventsource::EventSource;
 
         loop {
             self.wait_for_airlock().await?;
@@ -324,13 +362,15 @@ impl Proxy {
                     AuthScheme::Dpop => format!("DPoP {}", token),
                 };
 
-                self.http_client.get(sse_url)
+                self.http_client
+                    .get(sse_url)
                     .header("Authorization", auth_header)
                     .header("DPoP", dpop_proof)
                     .header("MCP-Protocol-Version", &self.protocol_version)
             } else {
                 info!("No token found for user in SSE listener, sending unauthenticated request to trigger discovery...");
-                self.http_client.get(sse_url)
+                self.http_client
+                    .get(sse_url)
                     .header("MCP-Protocol-Version", &self.protocol_version)
             };
 
@@ -338,11 +378,11 @@ impl Proxy {
                 let sid_lock = self.session_id.lock().await;
                 sid_lock.clone()
             };
-            
+
             if let Some(s) = sid {
                 request = request.header("MCP-Session-Id", s);
             }
-                
+
             info!("Opening SSE connection to {}...", sse_url);
             let mut source = EventSource::new(request)?;
 
@@ -358,17 +398,28 @@ impl Proxy {
                         if status.as_u16() == 401 {
                             warn!("401 Unauthorized received in SSE listener ({}). Triggering re-authentication...", sse_url);
                             source.close();
-                            
+
                             let challenge = WwwAuthenticate::parse(resp.headers());
                             let metadata_url = challenge.resource_metadata.or_else(|| {
-                                Some(format!("{}/.well-known/oauth-protected-resource", self.remote_url.trim_end_matches('/')))
+                                Some(format!(
+                                    "{}/.well-known/oauth-protected-resource",
+                                    self.remote_url.trim_end_matches('/')
+                                ))
                             });
 
                             let failing_token = self.vault.get_token(&self.user_id)?;
-                            self.trigger_reauth(failing_token.as_deref(), metadata_url.as_deref(), challenge.scope).await?;
+                            self.trigger_reauth(
+                                failing_token.as_deref(),
+                                metadata_url.as_deref(),
+                                challenge.scope,
+                            )
+                            .await?;
                             break;
                         } else {
-                            error!("SSE error: Invalid status code {} from {}. Response: {:?}", status, sse_url, resp);
+                            error!(
+                                "SSE error: Invalid status code {} from {}. Response: {:?}",
+                                status, sse_url, resp
+                            );
                             source.close();
                             break;
                         }
@@ -380,7 +431,7 @@ impl Proxy {
                     }
                 }
             }
-            
+
             warn!("SSE connection lost, retrying in 5 seconds...");
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }

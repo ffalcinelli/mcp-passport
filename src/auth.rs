@@ -1,18 +1,23 @@
+use crate::crypto::DpopKey;
+use crate::vault::Vault;
 use crate::Result;
+use anyhow::Context;
+use axum::{
+    extract::{Query, State},
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
 use oauth2::{
-    basic::BasicClient, AuthorizationCode, AuthUrl, ClientId, CsrfToken,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, TokenUrl,
+    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, TokenUrl,
 };
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
-use tracing::{info, error, warn};
-use crate::vault::Vault;
-use crate::crypto::DpopKey;
-use anyhow::Context;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::oneshot;
-use axum::{extract::{Query, State}, response::IntoResponse, routing::get, Router};
-use std::net::SocketAddr;
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct OidcConfig {
@@ -78,7 +83,7 @@ impl AuthManager {
         metadata_url_override: Option<&str>,
     ) -> Result<Self> {
         let http_client = HttpClient::new();
-        
+
         let discovery_url = metadata_url_override
             .map(|s| s.to_string())
             .or_else(|| oidc_config.discovery_url.clone());
@@ -90,17 +95,32 @@ impl AuthManager {
                 anyhow::bail!("Failed to fetch discovery document: {}", resp.status());
             }
             let doc: DiscoveryDocument = resp.json().await?;
-            
-            let auth = oidc_config.auth_url_override.clone().unwrap_or(doc.authorization_endpoint);
-            let token = oidc_config.token_url_override.clone().unwrap_or(doc.token_endpoint);
+
+            let auth = oidc_config
+                .auth_url_override
+                .clone()
+                .unwrap_or(doc.authorization_endpoint);
+            let token = oidc_config
+                .token_url_override
+                .clone()
+                .unwrap_or(doc.token_endpoint);
             let par = oidc_config.par_url_override.clone().or(doc.pushed_authorization_request_endpoint)
                 .context("Discovery document missing pushed_authorization_request_endpoint and no override provided")?;
-                
+
             (auth, token, par)
         } else {
-            let auth = oidc_config.auth_url_override.clone().context("auth_url is required when discovery_url is missing")?;
-            let token = oidc_config.token_url_override.clone().context("token_url is required when discovery_url is missing")?;
-            let par = oidc_config.par_url_override.clone().context("par_url is required when discovery_url is missing")?;
+            let auth = oidc_config
+                .auth_url_override
+                .clone()
+                .context("auth_url is required when discovery_url is missing")?;
+            let token = oidc_config
+                .token_url_override
+                .clone()
+                .context("token_url is required when discovery_url is missing")?;
+            let par = oidc_config
+                .par_url_override
+                .clone()
+                .context("par_url is required when discovery_url is missing")?;
             (auth, token, par)
         };
 
@@ -129,8 +149,16 @@ impl AuthManager {
     }
 
     /// Full re-authentication flow: PAR -> Loopback Callback -> Token Exchange
-    pub async fn reauthenticate(&self, user_id: &str, scopes: Option<Vec<String>>, url_tx: Option<oneshot::Sender<String>>) -> Result<()> {
-        info!("Starting FAPI 2.0 re-authentication flow for user '{}'...", user_id);
+    pub async fn reauthenticate(
+        &self,
+        user_id: &str,
+        scopes: Option<Vec<String>>,
+        url_tx: Option<oneshot::Sender<String>>,
+    ) -> Result<()> {
+        info!(
+            "Starting FAPI 2.0 re-authentication flow for user '{}'...",
+            user_id
+        );
 
         // 1. Generate and store new ephemeral DPoP key
         let dpop_key = DpopKey::generate();
@@ -148,12 +176,10 @@ impl AuthManager {
 
         let app = Router::new()
             .route("/callback", get(handle_callback))
-            .with_state(AuthServerState {
-                expected_state,
-                tx,
-            });
+            .with_state(AuthServerState { expected_state, tx });
 
-        let addr: SocketAddr = self.redirect_url
+        let addr: SocketAddr = self
+            .redirect_url
             .parse::<url::Url>()?
             .socket_addrs(|| None)?
             .first()
@@ -162,7 +188,7 @@ impl AuthManager {
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
-        
+
         // Notify of bound address if requested (for tests)
         {
             let mut lock = self.internal_callback_tx.lock().await;
@@ -200,7 +226,8 @@ impl AuthManager {
         let scope_str = s_vec.join(" ");
         par_params.push(("scope", &scope_str));
 
-        let par_res = self.http_client
+        let par_res = self
+            .http_client
             .post(&self.par_url)
             .form(&par_params)
             .send()
@@ -214,7 +241,7 @@ impl AuthManager {
         }
 
         let par_data: ParResponse = par_res.json().await?;
-        
+
         // 5. Direct user to Auth URL
         let auth_url = format!(
             "{}?client_id={}&response_type=code&request_uri={}",
@@ -226,9 +253,21 @@ impl AuthManager {
         warn!("{}", auth_url);
         warn!("****************************************************************");
 
-        // Attempt to open the browser automatically
-        if let Err(e) = open::that(&auth_url) {
-            warn!("Failed to open browser automatically: {}. Please copy the URL above.", e);
+        // Attempt to open the browser automatically (skip if in tests or explicitly requested)
+        let skip_open = std::env::var("MCP_PASSPORT_SKIP_OPEN_BROWSER").is_ok();
+        let mut has_listener = url_tx.is_some();
+
+        if !has_listener {
+            let lock = self.internal_url_tx.lock().await;
+            has_listener = lock.is_some();
+        }
+
+        if !skip_open && !has_listener {
+            if let Err(e) = open::that(&auth_url) {
+                warn!("Failed to open browser automatically: {}. Please copy the URL above.", e);
+            }
+        } else {
+            info!("Skipping automatic browser open (internal listener or skip flag present).");
         }
 
         // Send the URL to a possible listener (for tests)
@@ -258,9 +297,15 @@ impl AuthManager {
             .set_token_uri(TokenUrl::new(self.token_url.clone())?)
             .set_redirect_uri(RedirectUrl::new(self.redirect_url.clone())?);
 
-        // We use manual token exchange because FAPI 2.0 requires DPoP in headers, 
+        // We use manual token exchange because FAPI 2.0 requires DPoP in headers,
         // which the oauth2 crate doesn't natively support yet for the exchange_code call.
-        self.manual_token_exchange(user_id, &AuthorizationCode::new(code), &pkce_verifier, &dpop_key).await?;
+        self.manual_token_exchange(
+            user_id,
+            &AuthorizationCode::new(code),
+            &pkce_verifier,
+            &dpop_key,
+        )
+        .await?;
 
         Ok(())
     }
@@ -283,7 +328,8 @@ impl AuthManager {
             ("resource", self.resource.as_str()),
         ];
 
-        let res = self.http_client
+        let res = self
+            .http_client
             .post(&self.token_url)
             .header("DPoP", dpop_proof)
             .form(&params)
@@ -329,9 +375,17 @@ async fn handle_callback(
     let mut lock = state.tx.lock().await;
     if let Some(s) = lock.take() {
         let _ = s.send(query.code.clone());
-        (axum::http::StatusCode::OK, "Authentication successful! You can close this tab and return to the terminal.").into_response()
+        (
+            axum::http::StatusCode::OK,
+            "Authentication successful! You can close this tab and return to the terminal.",
+        )
+            .into_response()
     } else {
-        (axum::http::StatusCode::GONE, "Already authenticated or timed out.").into_response()
+        (
+            axum::http::StatusCode::GONE,
+            "Already authenticated or timed out.",
+        )
+            .into_response()
     }
 }
 

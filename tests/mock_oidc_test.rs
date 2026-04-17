@@ -1,13 +1,13 @@
-use mcp_passport::proxy::Proxy;
+use anyhow::Context;
+use axum::{routing::get, Router};
 use mcp_passport::auth::OidcConfig;
-use mcp_passport::vault::Vault;
 use mcp_passport::config::AuthScheme;
+use mcp_passport::proxy::Proxy;
+use mcp_passport::vault::Vault;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
-use axum::{routing::get, Router};
 use tokio::sync::mpsc;
-use anyhow::Context;
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn test_sse_piping_flow() -> anyhow::Result<()> {
@@ -17,17 +17,22 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
     use axum::response::sse::{Event, Sse};
     use futures::stream;
     use mcp_passport::crypto::DpopKey;
-    
-    let mcp_app = Router::new().route("/sse", get(|| async move {
-        let stream = stream::iter(vec![
-            Ok::<Event, std::convert::Infallible>(Event::default().data("{\"jsonrpc\":\"2.0\",\"method\":\"test/notify\"}")),
-        ]);
-        Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
-    }));
+
+    let mcp_app = Router::new().route(
+        "/sse",
+        get(|| async move {
+            let stream = stream::iter(vec![Ok::<Event, std::convert::Infallible>(
+                Event::default().data("{\"jsonrpc\":\"2.0\",\"method\":\"test/notify\"}"),
+            )]);
+            Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+        }),
+    );
     let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let mcp_addr = mcp_listener.local_addr()?;
     let sse_url = format!("http://127.0.0.1:{}/sse", mcp_addr.port());
-    tokio::spawn(async move { let _ = axum::serve(mcp_listener, mcp_app).await; });
+    tokio::spawn(async move {
+        let _ = axum::serve(mcp_listener, mcp_app).await;
+    });
 
     // 2. Setup Vault and AuthManager (minimal for SSE)
     let vault = Vault::new(test_svc);
@@ -45,7 +50,14 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
     };
-    let proxy = Arc::new(Proxy::new("http://unused", "sse_user", oidc_config, test_svc, "2025-11-25", AuthScheme::Bearer));
+    let proxy = Arc::new(Proxy::new(
+        "http://unused",
+        "sse_user",
+        oidc_config,
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    ));
 
     // 3. Start SSE Listener
     let (stdout_tx, mut stdout_rx) = mpsc::channel::<String>(100);
@@ -56,7 +68,9 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
     });
 
     // 4. Verify SSE data received
-    let msg = timeout(Duration::from_secs(5), stdout_rx.recv()).await?.context("No SSE message")?;
+    let msg = timeout(Duration::from_secs(5), stdout_rx.recv())
+        .await?
+        .context("No SSE message")?;
     assert!(msg.contains("test/notify"));
 
     Ok(())

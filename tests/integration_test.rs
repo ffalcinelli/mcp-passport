@@ -1,16 +1,16 @@
-use mcp_passport::proxy::Proxy;
-use mcp_passport::vault::Vault;
-use mcp_passport::crypto::DpopKey;
+use axum::http::HeaderMap;
+use axum::{routing::post, Json, Router};
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::AuthScheme;
+use mcp_passport::crypto::DpopKey;
+use mcp_passport::proxy::Proxy;
+use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::time::Duration;
+use testcontainers::{core::Mount, core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
+use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
-use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, core::Mount};
-use axum::{routing::post, Json, Router};
-use axum::http::HeaderMap;
 use tracing::info;
 
 async fn mock_mcp_handler(headers: HeaderMap, Json(payload): Json<Value>) -> Json<Value> {
@@ -19,7 +19,7 @@ async fn mock_mcp_handler(headers: HeaderMap, Json(payload): Json<Value>) -> Jso
     let dpop = headers.get("DPoP");
 
     if auth.is_none() || dpop.is_none() {
-         return Json(json!({
+        return Json(json!({
             "jsonrpc": "2.0",
             "id": payload["id"],
             "error": {"code": -32000, "message": "Unauthorized - Missing DPoP/Auth headers"}
@@ -56,21 +56,27 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
     // 2. Start Keycloak using Testcontainers
     let realm_path = std::env::current_dir()?.join("keycloak-realm.json");
     let realm_path_str = realm_path.to_str().unwrap();
-    
+
     let keycloak_img = GenericImage::new("quay.io/keycloak/keycloak", "latest")
         .with_wait_for(WaitFor::message_on_stdout("Listening on:"))
         .with_env_var("KEYCLOAK_ADMIN", "admin")
         .with_env_var("KEYCLOAK_ADMIN_PASSWORD", "admin")
-        .with_mount(Mount::bind_mount(realm_path_str, "/opt/keycloak/data/import/realm.json"))
+        .with_mount(Mount::bind_mount(
+            realm_path_str,
+            "/opt/keycloak/data/import/realm.json",
+        ))
         .with_cmd(["start-dev", "--import-realm"]);
 
-    let keycloak_container = keycloak_img.start().await.expect("Failed to start Keycloak");
+    let keycloak_container = keycloak_img
+        .start()
+        .await
+        .expect("Failed to start Keycloak");
 
     let keycloak_port = keycloak_container.get_host_port_ipv4(8080).await?;
     let keycloak_base = format!("http://127.0.0.1:{}", keycloak_port);
     let realm_base = format!("{}/realms/mcp", keycloak_base);
     let oidc_base = format!("{}/protocol/openid-connect", realm_base);
-    
+
     info!("Keycloak started at {}", keycloak_base);
 
     // 3. Start Mock MCP Server using Axum
@@ -78,7 +84,7 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let mock_addr = listener.local_addr()?;
     let mock_url = format!("http://{}/rpc", mock_addr);
-    
+
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -103,8 +109,15 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
-    let proxy = Arc::new(Proxy::new(&mock_url, "test_user_kc", oidc_config, test_svc, "2025-11-25", AuthScheme::Dpop));
-    
+    let proxy = Arc::new(Proxy::new(
+        &mock_url,
+        "test_user_kc",
+        oidc_config,
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Dpop,
+    ));
+
     // 6. Mock stdio
     let (mut client_writer, proxy_reader) = io::duplex(1024);
     let (proxy_writer, mut client_reader) = io::duplex(1024);
@@ -135,8 +148,10 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         "method": "tools/list",
         "params": {}
     });
-    
-    client_writer.write_all(format!("{}\n", request).as_bytes()).await?;
+
+    client_writer
+        .write_all(format!("{}\n", request).as_bytes())
+        .await?;
     client_writer.flush().await?;
 
     let mut reader = BufReader::new(&mut client_reader).lines();

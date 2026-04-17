@@ -1,12 +1,13 @@
-use keyring::Entry;
 use crate::Result;
 use anyhow::Context;
+use keyring::Entry;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
 
 // In-memory fallback for testing and headless environments where system keyring might be missing/unavailable
-static MEMORY_VAULT: Lazy<Mutex<HashMap<String, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static MEMORY_VAULT: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
 pub struct Vault {
@@ -35,7 +36,9 @@ impl Vault {
             return Ok(());
         }
         let entry = Entry::new(&self.service, user_id)?;
-        entry.set_password(token).context("Failed to store token in vault")?;
+        entry
+            .set_password(token)
+            .context("Failed to store token in vault")?;
         Ok(())
     }
 
@@ -73,7 +76,9 @@ impl Vault {
         }
         let dpop_service = format!("{}-dpop", self.service);
         let entry = Entry::new(&dpop_service, user_id)?;
-        entry.set_password(&key_hex).context("Failed to store DPoP key in vault")?;
+        entry
+            .set_password(&key_hex)
+            .context("Failed to store DPoP key in vault")?;
         Ok(())
     }
 
@@ -88,7 +93,9 @@ impl Vault {
             match entry.get_password() {
                 Ok(h) => Some(h),
                 Err(keyring::Error::NoEntry) => None,
-                Err(e) => return Err(anyhow::anyhow!(e).context("Failed to retrieve DPoP key from vault")),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e).context("Failed to retrieve DPoP key from vault"))
+                }
             }
         };
 
@@ -109,6 +116,7 @@ mod tests {
     #[test]
     fn test_vault_token_ops() -> Result<()> {
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
         let vault = Vault::new("mcp-passport-test");
         let user = "test_user_1";
         let token = "test_token_123";

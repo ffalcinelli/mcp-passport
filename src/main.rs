@@ -4,9 +4,9 @@ use mcp_passport::proxy::Proxy;
 use mcp_passport::Result;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{info, error};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tracing::{error, info};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
@@ -21,8 +21,8 @@ async fn main() -> Result<()> {
     let file_appender = tracing_appender::rolling::daily("logs", "mcp-passport.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 
     // Initialize tracing with dual outputs: stderr (for human/client) and file (for debugging)
     tracing_subscriber::registry()
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin).lines();
     let mut tasks = JoinSet::new();
-    
+
     info!("Ready to proxy MCP stdio messages...");
 
     loop {
@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
     info!("Waiting for remaining tasks to complete...");
     sse_handle.abort();
     while tasks.join_next().await.is_some() {}
-    
+
     // Drop stdout_tx so the writer task can finish
     drop(stdout_tx);
     let _ = stdout_handle.await;
