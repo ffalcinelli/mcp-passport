@@ -2,7 +2,6 @@ use mcp_passport::proxy::Proxy;
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::vault::Vault;
 use mcp_passport::config::AuthScheme;
-use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;

@@ -72,19 +72,17 @@ struct ParResponse {
 
 impl AuthManager {
     pub async fn discover(
-        discovery_url: Option<&str>,
-        client_id: String,
-        redirect_url: String,
+        oidc_config: OidcConfig,
         resource: String,
         service: &str,
-        auth_url_override: Option<String>,
-        token_url_override: Option<String>,
-        par_url_override: Option<String>,
-        internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
-        internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
+        metadata_url_override: Option<&str>,
     ) -> Result<Self> {
         let http_client = HttpClient::new();
         
+        let discovery_url = metadata_url_override
+            .map(|s| s.to_string())
+            .or_else(|| oidc_config.discovery_url.clone());
+
         let (auth_url, token_url, par_url) = if let Some(url) = discovery_url {
             info!("Fetching OIDC discovery from {}...", url);
             let resp = http_client.get(url).send().await?;
@@ -93,55 +91,30 @@ impl AuthManager {
             }
             let doc: DiscoveryDocument = resp.json().await?;
             
-            let auth = auth_url_override.unwrap_or(doc.authorization_endpoint);
-            let token = token_url_override.unwrap_or(doc.token_endpoint);
-            let par = par_url_override.or(doc.pushed_authorization_request_endpoint)
+            let auth = oidc_config.auth_url_override.clone().unwrap_or(doc.authorization_endpoint);
+            let token = oidc_config.token_url_override.clone().unwrap_or(doc.token_endpoint);
+            let par = oidc_config.par_url_override.clone().or(doc.pushed_authorization_request_endpoint)
                 .context("Discovery document missing pushed_authorization_request_endpoint and no override provided")?;
                 
             (auth, token, par)
         } else {
-            let auth = auth_url_override.context("auth_url is required when discovery_url is missing")?;
-            let token = token_url_override.context("token_url is required when discovery_url is missing")?;
-            let par = par_url_override.context("par_url is required when discovery_url is missing")?;
+            let auth = oidc_config.auth_url_override.clone().context("auth_url is required when discovery_url is missing")?;
+            let token = oidc_config.token_url_override.clone().context("token_url is required when discovery_url is missing")?;
+            let par = oidc_config.par_url_override.clone().context("par_url is required when discovery_url is missing")?;
             (auth, token, par)
         };
 
         Ok(Self {
-            client_id,
+            client_id: oidc_config.client_id,
             auth_url,
             token_url,
             par_url,
-            redirect_url,
+            redirect_url: oidc_config.redirect_url,
             resource,
             http_client,
             vault: Vault::new(service),
-            internal_url_tx,
-            internal_callback_tx,
-        })
-    }
-
-    pub fn new(
-        client_id: String,
-        auth_url: String,
-        token_url: String,
-        par_url: String,
-        redirect_url: String,
-        resource: String,
-        service: &str,
-        internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
-        internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
-    ) -> Result<Self> {
-        Ok(Self {
-            client_id,
-            auth_url,
-            token_url,
-            par_url,
-            redirect_url,
-            resource,
-            http_client: HttpClient::new(),
-            vault: Vault::new(service),
-            internal_url_tx,
-            internal_callback_tx,
+            internal_url_tx: oidc_config.internal_url_tx,
+            internal_callback_tx: oidc_config.internal_callback_tx,
         })
     }
 
@@ -216,7 +189,6 @@ impl AuthManager {
             ("resource", self.resource.as_str()),
         ];
 
-        let scope_str;
         let mut s_vec = if let Some(ref s) = scopes {
             s.clone()
         } else {
@@ -225,7 +197,7 @@ impl AuthManager {
         if !s_vec.contains(&"openid".to_string()) {
             s_vec.push("openid".to_string());
         }
-        scope_str = s_vec.join(" ");
+        let scope_str = s_vec.join(" ");
         par_params.push(("scope", &scope_str));
 
         let par_res = self.http_client

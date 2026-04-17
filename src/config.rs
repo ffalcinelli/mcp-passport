@@ -1,15 +1,10 @@
 use clap::{Parser, ValueEnum};
 
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthScheme {
+    #[default]
     Bearer,
     Dpop,
-}
-
-impl Default for AuthScheme {
-    fn default() -> Self {
-        Self::Bearer
-    }
 }
 
 #[derive(Parser, Debug, Clone)]

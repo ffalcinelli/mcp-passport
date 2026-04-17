@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, StatusCode};
 use tokio::sync::{oneshot, mpsc};
 use anyhow::Context;
 use tracing::{info, error};
-use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, core::ContainerPort};
+use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 use fantoccini::{ClientBuilder, Locator};
 
 #[derive(Clone)]

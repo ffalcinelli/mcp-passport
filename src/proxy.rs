@@ -59,9 +59,9 @@ fn extract_param(header: &str, param: &str) -> Option<String> {
     if let Some(start) = header.find(&needle) {
         let val_start = start + needle.len();
         let remainder = &header[val_start..];
-        if remainder.starts_with('"') {
-            if let Some(end) = remainder[1..].find('"') {
-                return Some(remainder[1..end + 1].to_string());
+        if let Some(stripped) = remainder.strip_prefix('"') {
+            if let Some(end) = stripped.find('"') {
+                return Some(stripped[..end].to_string());
             }
         } else {
             let end = remainder.find(',').unwrap_or(remainder.len());
@@ -119,16 +119,10 @@ impl Proxy {
         info!("Performing dynamic discovery for AuthManager (url: {:?})...", discovery_url);
         
         let am = AuthManager::discover(
-            discovery_url.as_deref(),
-            self.oidc_config.client_id.clone(),
-            self.oidc_config.redirect_url.clone(),
+            self.oidc_config.clone(),
             self.remote_url.clone(), // This is the 'resource'
             &self.vault.service,
-            self.oidc_config.auth_url_override.clone(),
-            self.oidc_config.token_url_override.clone(),
-            self.oidc_config.par_url_override.clone(),
-            self.oidc_config.internal_url_tx.clone(),
-            self.oidc_config.internal_callback_tx.clone(),
+            metadata_url,
         ).await?;
 
 
