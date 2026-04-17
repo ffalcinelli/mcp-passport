@@ -1,0 +1,60 @@
+{
+  "id": "mcp-realm",
+  "realm": "mcp",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "mcp-passport",
+      "name": "MCP Passport Proxy",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:8082/callback",
+        "http://localhost:8082/callback"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "require.pushed.authorization.requests": "true",
+        "dpop.bound.access.tokens": "true",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "use.refresh.tokens": "true"
+      }
+    },
+    {
+      "clientId": "mock-mcp",
+      "name": "Mock MCP Server",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "mock-mcp-secret",
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true
+    }
+  ],
+  "users": [
+    {
+      "username": "jdoe",
+      "enabled": true,
+      "email": "jdoe@example.com",
+      "firstName": "John",
+      "lastName": "Doe",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

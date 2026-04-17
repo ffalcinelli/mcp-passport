@@ -1,0 +1,49 @@
+[package]
+name = "mcp-passport"
+version = "0.0.1"
+edition = "2021"
+authors = ["Fabio Falcinelli <fabio.falcinelli@gmail.com>"]
+description = "Secure 1:1 transparent Layer 7 proxy for the Model Context Protocol (MCP)"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.37", features = ["full"] }
+futures = "0.3.30"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Networking & SSE
+reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest-eventsource = "0.6"
+url = "2.5"
+
+# Security & Auth
+oauth2 = { version = "5.0", features = ["reqwest"] }
+jsonwebtoken = "9.3"
+keyring = "2.3"
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand_core = { version = "0.6", features = ["std"] }
+base64 = "0.22"
+uuid = { version = "1.8", features = ["v4"] }
+hex = "0.4"
+sha2 = "0.10"
+
+# Error Handling & Logging
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+open = "5.1"
+
+# Local Loopback Server (for OIDC Callback)
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# CLI Parsing
+clap = { version = "4.5", features = ["derive", "env"] }
+
+[dev-dependencies]
+testcontainers = "0.23"
+tokio = { version = "1.37", features = ["full", "macros"] }

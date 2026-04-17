@@ -1,0 +1,22 @@
+{
+  "security": {
+    "auth": {
+      "selectedType": "oauth-personal"
+    }
+  },
+  "mcpServers": {
+    "mcp-passport-local": {
+      "command": "/home/fabio/Workspace/mcp-passport/target/debug/mcp-passport",
+      "args": [],
+      "env": {
+        "MCP_PASSPORT_REMOTE_MCP_URL": "http://localhost:8081/rpc",
+        "MCP_PASSPORT_REMOTE_SSE_URL": "http://localhost:8081/sse",
+        "MCP_PASSPORT_OIDC_DISCOVERY_URL": "http://localhost:8080/realms/mcp/.well-known/openid-configuration",
+        "MCP_PASSPORT_OIDC_CLIENT_ID": "mcp-passport",
+        "MCP_PASSPORT_OIDC_REDIRECT_URL": "http://127.0.0.1:8082/callback",
+        "MCP_PASSPORT_LOG_LEVEL": "debug"
+      },
+      "trust": true
+    }
+  }
+}
