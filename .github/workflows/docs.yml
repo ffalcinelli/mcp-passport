@@ -3,16 +3,14 @@ name: Documentation
 on:
   push:
     branches: ["main"]
+    tags: ["v*"]
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
   group: "pages"
   cancel-in-progress: false
@@ -21,11 +19,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all tags
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -33,29 +33,43 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Generate Documentation
-        run: cargo doc --no-deps --all-features
-
-      - name: Add Redirector
+      - name: Determine Version
+        id: version
         run: |
-          # Create a landing page that redirects to the crate documentation
-          echo '<meta http-equiv="refresh" content="0; url=mcp_passport/index.html">' > target/doc/index.html
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=latest" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
+      - name: Generate Documentation
+        run: |
+          cargo doc --no-deps --all-features --html-in-header docs-header.html
 
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: 'target/doc'
+      - name: Prepare Deployment Artifact
+        run: |
+          VERSION_DIR="target/deploy/${{ steps.version.outputs.version }}"
+          mkdir -p "$VERSION_DIR"
+          # Rustdoc output is in target/doc, we want it in target/deploy/<version>
+          cp -r target/doc/* "$VERSION_DIR/"
+          
+          # Root redirector
+          echo '<meta http-equiv="refresh" content="0; url=latest/mcp_passport/index.html">' > target/deploy/index.html
+          
+          # Generate versions.json correctly
+          # Start the array
+          echo -n '["latest"' > target/deploy/versions.json
+          # Append each tag with a leading comma and quotes
+          git tag -l 'v*' | sort -V -r | while read tag; do
+            echo -n ", \"$tag\"" >> target/deploy/versions.json
+          done
+          # Close the array
+          echo -n ']' >> target/deploy/versions.json
 
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
       - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: target/deploy
+          branch: gh-pages
+          target-folder: .
+          clean: false
