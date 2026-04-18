@@ -1,3 +1,10 @@
+//! # OS-Native Secure Vault
+//!
+//! This module provides an abstraction over the system's native secure storage
+//! (macOS Keychain, Windows Credential Manager, Linux Secret Service) via the `keyring` crate.
+//!
+//! It also includes an in-memory fallback for headless or testing environments.
+
 use crate::Result;
 use anyhow::Context;
 use keyring::Entry;
@@ -9,13 +16,17 @@ use std::sync::Mutex;
 static MEMORY_VAULT: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// A secure storage abstraction for tokens and keys.
 #[derive(Clone)]
 pub struct Vault {
+    /// The service name used for isolation in the keychain.
     pub service: String,
+    /// Whether to bypass the system keychain and use an in-memory store.
     use_memory: bool,
 }
 
 impl Vault {
+    /// Creates a new Vault instance for a given service name.
     pub fn new(service: &str) -> Self {
         // Automatically use memory vault if environment variable is set
         let use_memory = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT").is_ok();
@@ -29,6 +40,7 @@ impl Vault {
         format!("{}:{}:{}", self.service, user_id, suffix)
     }
 
+    /// Stores an access token securely in the vault.
     pub fn store_token(&self, user_id: &str, token: &str) -> Result<()> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
@@ -45,6 +57,7 @@ impl Vault {
         Ok(())
     }
 
+    /// Retrieves an access token from the vault.
     pub fn get_token(&self, user_id: &str) -> Result<Option<String>> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
@@ -62,6 +75,7 @@ impl Vault {
         }
     }
 
+    /// Deletes an access token from the vault.
     pub fn delete_token(&self, user_id: &str) -> Result<()> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
@@ -76,7 +90,7 @@ impl Vault {
         Ok(())
     }
 
-    /// Stores the DPoP private key as hex string
+    /// Stores the DPoP private key securely.
     pub fn store_dpop_key(&self, user_id: &str, key_bytes: &[u8]) -> Result<()> {
         let key_hex = hex::encode(key_bytes);
         if self.use_memory {
@@ -95,7 +109,7 @@ impl Vault {
         Ok(())
     }
 
-    /// Retrieves the DPoP private key bytes
+    /// Retrieves the DPoP private key from the vault.
     pub fn get_dpop_key(&self, user_id: &str) -> Result<Option<Vec<u8>>> {
         let key_hex = if self.use_memory {
             let key = self.make_key(user_id, "dpop");

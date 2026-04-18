@@ -64,6 +64,33 @@ cargo build --release
 
 The compiled binary will be located at `target/release/mcp-passport`.
 
+### Claude Desktop Integration
+
+To use `mcp-passport` with Claude Desktop, add it to your `claude_desktop_config.json`:
+
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`  
+**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "my-secure-server": {
+      "command": "/path/to/mcp-passport",
+      "args": [
+        "--remote-mcp-url", "https://your-mcp-server.com/rpc",
+        "--remote-sse-url", "https://your-mcp-server.com/sse",
+        "--oidc-client-id", "your-client-id"
+      ],
+      "env": {
+        "RUST_LOG": "info"
+      }
+    }
+  }
+}
+```
+
+When Claude starts the server, `mcp-passport` will output an authentication URL to `stderr`. You'll need to open this URL in your browser to complete the OIDC login. Once authenticated, tokens are securely stored in your OS keychain and used automatically for future sessions.
+
 ## ⚙️ Configuration
 
 `mcp-passport` can be configured via CLI flags or environment variables.

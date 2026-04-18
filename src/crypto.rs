@@ -1,3 +1,13 @@
+//! # DPoP Cryptographic Primitives
+//!
+//! This module provides the implementation of **Demonstrating Proof-of-Possession** (DPoP)
+//! as per [RFC 9449](https://datatracker.ietf.org/doc/html/rfc9449).
+//!
+//! It handles:
+//! - P-256 key pair generation.
+//! - DPoP-signed JWT generation.
+//! - SHA-256 hashing of access tokens for the `ath` claim.
+
 use crate::Result;
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -10,7 +20,9 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+/// An ephemeral P-256 key pair used for signing DPoP proofs.
 pub struct DpopKey {
+    /// The ECDSA signing key.
     signing_key: SigningKey,
 }
 
@@ -62,6 +74,7 @@ impl DpopKey {
         self.generate_proof_with_ath(htm, htu, None)
     }
 
+    /// Generates a DPoP Proof JWT with an access token hash (ath).
     pub fn generate_proof_with_ath(
         &self,
         htm: &str,

@@ -1,3 +1,11 @@
+//! # mcp-passport: The AI-to-MCP Bridge
+//!
+//! This is the main entry point for the `mcp-passport` CLI. It handles command-line
+//! configuration, initializes the `Proxy` bridge, and manages the lifecycle of the
+//! stdio and SSE tasks.
+//!
+//! The application is designed to run as a subprocess for AI clients (e.g., Claude Desktop).
+
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::Config;
 use mcp_passport::proxy::Proxy;
