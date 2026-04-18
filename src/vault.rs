@@ -181,4 +181,25 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_vault_dpop_ops() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::new("mcp-passport-test");
+        let user = "test_user_dpop";
+        let key_bytes = b"test_key_bytes_123456789012345678";
+
+        // Store
+        vault.store_dpop_key(user, key_bytes)?;
+
+        // Get
+        let retrieved = vault.get_dpop_key(user)?;
+        assert_eq!(retrieved, Some(key_bytes.to_vec()));
+
+        // Non-existent user
+        let none = vault.get_dpop_key("non_existent")?;
+        assert_eq!(none, None);
+
+        Ok(())
+    }
 }
