@@ -106,7 +106,10 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
 
     let keycloak_port = keycloak_container.get_host_port_ipv4(8080).await?;
     let keycloak_base = format!("http://127.0.0.1:{}", keycloak_port);
-    let oidc_discovery = format!("{}/realms/mcp/.well-known/openid-configuration", keycloak_base);
+    let oidc_discovery = format!(
+        "{}/realms/mcp/.well-known/openid-configuration",
+        keycloak_base
+    );
 
     info!("Keycloak started at {}", keycloak_base);
 
@@ -209,12 +212,18 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     client.goto(&auth_url).await?;
 
     info!("Submitting credentials for jdoe...");
-    timeout(Duration::from_secs(30), client.wait().for_element(Locator::Id("username"))).await??;
-    client.find(Locator::Id("username"))
+    timeout(
+        Duration::from_secs(30),
+        client.wait().for_element(Locator::Id("username")),
+    )
+    .await??;
+    client
+        .find(Locator::Id("username"))
         .await?
         .send_keys("jdoe")
         .await?;
-    client.find(Locator::Id("password"))
+    client
+        .find(Locator::Id("password"))
         .await?
         .send_keys("password")
         .await?;
