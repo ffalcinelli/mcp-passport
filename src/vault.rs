@@ -151,4 +151,34 @@ mod tests {
         assert_eq!(deleted, None);
         Ok(())
     }
+
+    #[test]
+    fn test_mutex_poison_recovery() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::new("mcp-passport-test");
+
+        // Poison the mutex by panicking while holding the lock
+        let _ = std::thread::spawn(|| {
+            let _lock = MEMORY_VAULT.lock().unwrap();
+            panic!("Poisoning the mutex");
+        })
+        .join();
+
+        // Verify it is indeed poisoned
+        assert!(MEMORY_VAULT.lock().is_err());
+
+        // Now try to use the vault. It should not panic because we handle poisoning.
+        let user = "test_user_poison";
+        let token = "token_after_poison";
+
+        vault.store_token(user, token)?;
+        let retrieved = vault.get_token(user)?;
+        assert_eq!(retrieved, Some(token.to_string()));
+
+        // Also test other operations
+        vault.delete_token(user)?;
+        assert_eq!(vault.get_token(user)?, None);
+
+        Ok(())
+    }
 }
