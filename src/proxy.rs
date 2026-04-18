@@ -7,9 +7,9 @@ use anyhow::Context;
 use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
-use url::Url;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
+use url::Url;
 
 pub struct Proxy {
     http_client: Client,
@@ -64,8 +64,7 @@ fn extract_param(header: &str, param: &str) -> Option<String> {
     if let Some(start) = header.find(&needle) {
         let val_start = start + needle.len();
         let remainder = &header[val_start..];
-        if remainder.starts_with('"') {
-            let stripped = &remainder[1..];
+        if let Some(stripped) = remainder.strip_prefix('"') {
             if let Some(end) = stripped.find('"') {
                 return Some(stripped[..end].to_string());
             }
@@ -253,8 +252,12 @@ impl Proxy {
                         })
                     });
 
-                    self.trigger_reauth(token_opt.as_deref(), metadata_url.as_deref(), challenge.scope)
-                        .await?;
+                    self.trigger_reauth(
+                        token_opt.as_deref(),
+                        metadata_url.as_deref(),
+                        challenge.scope,
+                    )
+                    .await?;
                     retry_count += 1;
                     continue;
                 }
@@ -295,11 +298,13 @@ impl Proxy {
         // If another task just finished re-authenticating, the token in the vault will be different or present.
         let current_token = self.vault.get_token(&self.user_id)?;
         let current_count = { *self.reauth_count.read().await };
-        
+
         debug!(
             "Re-auth redundant check: failing={:?}, current={:?}, count={}/{}, scopes={:?}",
             failing_token.map(|t| &t[..std::cmp::min(8, t.len())]),
-            current_token.as_deref().map(|t| &t[..std::cmp::min(8, t.len())]),
+            current_token
+                .as_deref()
+                .map(|t| &t[..std::cmp::min(8, t.len())]),
             initial_count,
             current_count,
             scopes
@@ -339,24 +344,26 @@ impl Proxy {
             let mut last = self.last_reauth.lock().await;
             if let Some(t) = *last {
                 let elapsed = now.duration_since(t);
-                
+
                 if elapsed < std::time::Duration::from_secs(5) {
                     if current_count > initial_count {
-                         info!("Count increased during cooldown, skipping redundant re-auth.");
-                         return Ok(());
+                        info!("Count increased during cooldown, skipping redundant re-auth.");
+                        return Ok(());
                     }
-                    
+
                     // If we just re-authenticated successfully (count increased), and we ALREADY HAVE a new token,
                     // but we still got a 401, we should NOT re-auth immediately again.
                     // This prevents infinite loops if the new token is being rejected.
                     if current_count > 0 && current_token.is_some() {
-                        warn!("Fresh token was rejected. Skipping immediate re-auth to prevent loop.");
+                        warn!(
+                            "Fresh token was rejected. Skipping immediate re-auth to prevent loop."
+                        );
                         return Ok(());
                     }
 
                     warn!("Re-authentication triggered very rapidly (within 5s).");
                 }
-                
+
                 if elapsed < std::time::Duration::from_secs(1) {
                     error!("Authentication loop detected. Re-authentication triggered too frequently (within 1s).");
                     return Err(anyhow::anyhow!("Authentication loop detected. Please check your credentials and environment configuration."));
@@ -378,15 +385,15 @@ impl Proxy {
                 // If it was missing from the start, we don't need to delete anything,
                 // but we should check if it's still missing.
                 if current_token.is_some() {
-                     info!("Token appeared while preparing re-auth, skipping.");
-                     let _ = self.suspension_tx.send(false);
-                     return Ok(());
+                    info!("Token appeared while preparing re-auth, skipping.");
+                    let _ = self.suspension_tx.send(false);
+                    return Ok(());
                 }
             }
         }
 
         let auth_manager_res = self.ensure_auth_manager(metadata_url).await;
-        
+
         let auth_manager = match auth_manager_res {
             Ok(am) => am,
             Err(e) => {
@@ -516,15 +523,20 @@ impl Proxy {
                             let challenge = WwwAuthenticate::parse(resp.headers());
                             let metadata_url = challenge.resource_metadata.or_else(|| {
                                 Url::parse(&self.remote_url).ok().and_then(|u| {
-                                    u.join("/.well-known/oauth-protected-resource").ok().map(|url| url.to_string())
+                                    u.join("/.well-known/oauth-protected-resource")
+                                        .ok()
+                                        .map(|url| url.to_string())
                                 })
                             });
 
-                            if let Err(e) = self.trigger_reauth(
-                                token_for_trigger.as_deref(),
-                                metadata_url.as_deref(),
-                                challenge.scope,
-                            ).await {
+                            if let Err(e) = self
+                                .trigger_reauth(
+                                    token_for_trigger.as_deref(),
+                                    metadata_url.as_deref(),
+                                    challenge.scope,
+                                )
+                                .await
+                            {
                                 error!("Re-authentication flow failed in SSE listener: {:?}. Retrying connection in 5s...", e);
                             }
                             break;

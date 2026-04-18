@@ -113,14 +113,15 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
-    let proxy = Arc::new(Proxy::new(
+    let proxy = Proxy::new(
         &mock_url,
         "test_user_kc",
         oidc_config,
         test_svc,
         "2025-11-25",
         AuthScheme::Dpop,
-    ));
+    );
+
 
     // 6. Mock stdio
     let (mut client_writer, proxy_reader) = io::duplex(1024);

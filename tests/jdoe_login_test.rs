@@ -1,14 +1,14 @@
 use anyhow::Context;
 use fantoccini::{ClientBuilder, Locator};
 use mcp_passport::auth::OidcConfig;
-use mcp_passport::config::{AuthScheme, Config};
+use mcp_passport::config::AuthScheme;
 use mcp_passport::proxy::Proxy;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::info;
 
 #[tokio::test]
 #[ignore] // Requires docker-compose and chromedriver running
@@ -21,7 +21,9 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     let redirect_url = "http://127.0.0.1:8082/callback";
 
     let oidc_config = OidcConfig {
-        discovery_url: Some("http://localhost:8080/realms/mcp/.well-known/openid-configuration".to_string()),
+        discovery_url: Some(
+            "http://localhost:8080/realms/mcp/.well-known/openid-configuration".to_string(),
+        ),
         client_id: "mcp-passport".to_string(),
         redirect_url: redirect_url.to_string(),
         auth_url_override: None,
@@ -41,9 +43,8 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     );
 
     // 1. Setup Auth URL capture
-    let (url_tx, mut url_rx) = mpsc::channel::<String>(1);
     let (oneshot_tx, oneshot_rx) = oneshot::channel::<String>();
-    
+
     let proxy_for_auth = proxy.clone();
     tokio::spawn(async move {
         // We need to wait for AuthManager to be discovered
@@ -65,12 +66,14 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     // 2. Trigger request
     let proxy_call = proxy.clone();
     let request_task = tokio::spawn(async move {
-        proxy_call.handle_request(json!({
-            "jsonrpc": "2.0",
-            "id": "list-1",
-            "method": "tools/list",
-            "params": {}
-        })).await
+        proxy_call
+            .handle_request(json!({
+                "jsonrpc": "2.0",
+                "id": "list-1",
+                "method": "tools/list",
+                "params": {}
+            }))
+            .await
     });
 
     // 3. Perform Login
@@ -81,7 +84,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     let mut caps = serde_json::map::Map::new();
     let chrome_opts = json!({ "args": ["--headless", "--disable-gpu", "--no-sandbox"] });
     caps.insert("goog:chromeOptions".to_string(), chrome_opts);
-    
+
     let c = ClientBuilder::native()
         .capabilities(caps)
         .connect("http://localhost:9515")
@@ -89,10 +92,16 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
         .context("Failed to connect to WebDriver (is chromedriver --port=9515 running?)")?;
 
     c.goto(&auth_url).await?;
-    
+
     info!("Submitting credentials for jdoe...");
-    c.find(Locator::Id("username")).await?.send_keys("jdoe").await?;
-    c.find(Locator::Id("password")).await?.send_keys("jdoe_password").await?; // Assuming this is the password in keycloak-realm.json
+    c.find(Locator::Id("username"))
+        .await?
+        .send_keys("jdoe")
+        .await?;
+    c.find(Locator::Id("password"))
+        .await?
+        .send_keys("jdoe_password")
+        .await?; // Assuming this is the password in keycloak-realm.json
     c.find(Locator::Id("kc-login")).await?.click().await?;
 
     // 4. Verify request success
@@ -103,16 +112,18 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
 
     // 5. Invoke a tool
     info!("Invoking mock tool...");
-    let res_tool = proxy.handle_request(json!({
-        "jsonrpc": "2.0",
-        "id": "call-1",
-        "method": "tools/call",
-        "params": {
-            "name": "test_tool",
-            "arguments": { "input": "hello" }
-        }
-    })).await?;
-    
+    let res_tool = proxy
+        .handle_request(json!({
+            "jsonrpc": "2.0",
+            "id": "call-1",
+            "method": "tools/call",
+            "params": {
+                "name": "test_tool",
+                "arguments": { "input": "hello" }
+            }
+        }))
+        .await?;
+
     info!("Tool call result: {:?}", res_tool);
     assert!(res_tool.get("result").is_some());
 

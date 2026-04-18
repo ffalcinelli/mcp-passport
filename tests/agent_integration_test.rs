@@ -1,16 +1,14 @@
 use anyhow::Context;
 use fantoccini::{ClientBuilder, Locator};
 use mcp_passport::auth::OidcConfig;
-use mcp_passport::config::{AuthScheme, Config};
+use mcp_passport::config::AuthScheme;
 use mcp_passport::proxy::Proxy;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::info;
 
 /// This test simulates a "real world" scenario where:
 /// 1. Docker Compose is running (Keycloak + Mock MCP Server)
@@ -31,7 +29,9 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     let redirect_url = "http://127.0.0.1:8082/callback";
 
     let oidc_config = OidcConfig {
-        discovery_url: Some("http://localhost:8080/realms/mcp/.well-known/openid-configuration".to_string()),
+        discovery_url: Some(
+            "http://localhost:8080/realms/mcp/.well-known/openid-configuration".to_string(),
+        ),
         client_id: "mcp-passport".to_string(),
         redirect_url: redirect_url.to_string(),
         auth_url_override: None,
@@ -51,14 +51,22 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     );
 
     // 1. Start a listener for the Auth URL
-    let (url_tx, mut url_rx) = mpsc::channel::<String>(1);
     let (oneshot_tx, oneshot_rx) = oneshot::channel::<String>();
-    
+
     // We need to inject the URL into our listener
     let proxy_for_auth = proxy.clone();
     tokio::spawn(async move {
         let (tx, rx) = oneshot::channel();
-        proxy_for_auth.auth_manager.read().await.as_ref().unwrap().set_internal_url_tx(tx).await;
+        // Wait for discovery to complete
+        loop {
+            let am_lock = proxy_for_auth.auth_manager.read().await;
+            if let Some(am) = am_lock.as_ref() {
+                am.set_internal_url_tx(tx).await;
+                break;
+            }
+            drop(am_lock);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         if let Ok(url) = rx.await {
             let _ = oneshot_tx.send(url);
         }
@@ -67,12 +75,14 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     // 2. Trigger first request (will require auth)
     let proxy_call = proxy.clone();
     let first_request = tokio::spawn(async move {
-        proxy_call.handle_request(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {}
-        })).await
+        proxy_call
+            .handle_request(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .await
     });
 
     // 3. Wait for the Auth URL and perform headless login
@@ -83,7 +93,7 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     let mut caps = serde_json::map::Map::new();
     let chrome_opts = json!({ "args": ["--headless", "--disable-gpu", "--no-sandbox"] });
     caps.insert("goog:chromeOptions".to_string(), chrome_opts);
-    
+
     let c = ClientBuilder::native()
         .capabilities(caps)
         .connect("http://localhost:9515")
@@ -91,11 +101,17 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
         .context("Failed to connect to WebDriver (is chromedriver --port=9515 running?)")?;
 
     c.goto(&auth_url).await?;
-    
+
     // Keycloak login form
     info!("Filling Keycloak login form...");
-    c.find(Locator::Id("username")).await?.send_keys("test_user").await?;
-    c.find(Locator::Id("password")).await?.send_keys("test_password").await?;
+    c.find(Locator::Id("username"))
+        .await?
+        .send_keys("test_user")
+        .await?;
+    c.find(Locator::Id("password"))
+        .await?
+        .send_keys("test_password")
+        .await?;
     c.find(Locator::Id("kc-login")).await?.click().await?;
 
     // 4. Verify first request completes
@@ -106,17 +122,25 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     // 5. Trigger SECOND request (should be INSTANT, no auth triggered)
     info!("Starting second request (should use cached token)...");
     let start = std::time::Instant::now();
-    let res2 = timeout(Duration::from_secs(2), proxy.handle_request(json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {}
-    }))).await??;
-    
+    let res2 = timeout(
+        Duration::from_secs(2),
+        proxy.clone().handle_request(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        })),
+    )
+    .await??;
+
     let duration = start.elapsed();
     info!("Second request completed in {:?}", duration);
-    assert!(res2.is_ok());
-    assert!(duration < Duration::from_millis(500), "Second request took too long ({:?}), likely triggered re-auth", duration);
+    assert!(res2.get("result").is_some());
+    assert!(
+        duration < Duration::from_millis(500),
+        "Second request took too long ({:?}), likely triggered re-auth",
+        duration
+    );
 
     c.close().await?;
     Ok(())

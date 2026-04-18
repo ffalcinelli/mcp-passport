@@ -192,14 +192,14 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-compliance-headless-v1";
     let vault = Vault::new(test_svc);
     let _ = vault.delete_token("mock_user");
-    let proxy = Arc::new(Proxy::new(
+    let proxy = Proxy::new(
         &mcp_url,
         "mock_user",
         oidc_config,
         test_svc,
         "2025-11-25",
         AuthScheme::Bearer,
-    ));
+    );
 
     // 6. Start Proxy Task
     let (mut client_writer, proxy_reader) = io::duplex(1024);
