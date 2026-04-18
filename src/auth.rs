@@ -212,7 +212,7 @@ impl AuthManager {
             }
         }
 
-        let listener = listener.unwrap();
+        let listener = listener.context("Failed to bind loopback listener after retries")?;
         let local_addr = listener.local_addr()?;
 
         // Notify of bound address if requested (for tests)
