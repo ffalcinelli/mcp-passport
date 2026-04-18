@@ -122,7 +122,6 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         AuthScheme::Dpop,
     );
 
-
     // 6. Mock stdio
     let (mut client_writer, proxy_reader) = io::duplex(1024);
     let (proxy_writer, mut client_reader) = io::duplex(1024);

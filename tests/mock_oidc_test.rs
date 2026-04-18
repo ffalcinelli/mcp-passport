@@ -276,11 +276,11 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
     // 1. Setup Mock Server that returns 401
     let auth_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-    let mcp_app = Router::new().route(
-        "/rpc",
-        post({
-            move |headers: HeaderMap| {
-                async move {
+    let mcp_app = Router::new()
+        .route(
+            "/rpc",
+            post({
+                move |headers: HeaderMap| async move {
                     let auth = headers.get("Authorization");
                     if auth.is_some() {
                         return axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"}))
@@ -290,7 +290,8 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
                         .get("host")
                         .and_then(|h| h.to_str().ok())
                         .unwrap_or("127.0.0.1");
-                    let challenge = format!("Bearer resource_metadata=\"http://{}/discovery\"", host);
+                    let challenge =
+                        format!("Bearer resource_metadata=\"http://{}/discovery\"", host);
                     (
                         axum::http::StatusCode::UNAUTHORIZED,
                         [("WWW-Authenticate", challenge)],
@@ -298,29 +299,28 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
                     )
                         .into_response()
                 }
-            }
-        }),
-    )
-    .route(
-        "/discovery",
-        get({
-            let ac = auth_counter.clone();
-            move || {
-                let ac = ac.clone();
-                async move {
-                    ac.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    // Return a discovery doc that will lead to a re-auth
-                    // We use dummy URLs because we just want to see how many times trigger_reauth is called
-                    axum::Json(json!({
-                        "issuer": "http://localhost",
-                        "authorization_endpoint": "http://localhost/auth",
-                        "token_endpoint": "http://localhost/token",
-                        "pushed_authorization_request_endpoint": "http://localhost/par"
-                    }))
+            }),
+        )
+        .route(
+            "/discovery",
+            get({
+                let ac = auth_counter.clone();
+                move || {
+                    let ac = ac.clone();
+                    async move {
+                        ac.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // Return a discovery doc that will lead to a re-auth
+                        // We use dummy URLs because we just want to see how many times trigger_reauth is called
+                        axum::Json(json!({
+                            "issuer": "http://localhost",
+                            "authorization_endpoint": "http://localhost/auth",
+                            "token_endpoint": "http://localhost/token",
+                            "pushed_authorization_request_endpoint": "http://localhost/par"
+                        }))
+                    }
                 }
-            }
-        }),
-    );
+            }),
+        );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
