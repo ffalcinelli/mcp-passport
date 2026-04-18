@@ -32,7 +32,10 @@ impl Vault {
     pub fn store_token(&self, user_id: &str, token: &str) -> Result<()> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
-            MEMORY_VAULT.lock().unwrap().insert(key, token.to_string());
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, token.to_string());
             return Ok(());
         }
         let entry = Entry::new(&self.service, user_id)?;
@@ -45,7 +48,11 @@ impl Vault {
     pub fn get_token(&self, user_id: &str) -> Result<Option<String>> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
-            return Ok(MEMORY_VAULT.lock().unwrap().get(&key).cloned());
+            return Ok(MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .cloned());
         }
         let entry = Entry::new(&self.service, user_id)?;
         match entry.get_password() {
@@ -58,7 +65,10 @@ impl Vault {
     pub fn delete_token(&self, user_id: &str) -> Result<()> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
-            MEMORY_VAULT.lock().unwrap().remove(&key);
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
             return Ok(());
         }
         let entry = Entry::new(&self.service, user_id)?;
@@ -71,7 +81,10 @@ impl Vault {
         let key_hex = hex::encode(key_bytes);
         if self.use_memory {
             let key = self.make_key(user_id, "dpop");
-            MEMORY_VAULT.lock().unwrap().insert(key, key_hex);
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, key_hex);
             return Ok(());
         }
         let dpop_service = format!("{}-dpop", self.service);
@@ -86,7 +99,11 @@ impl Vault {
     pub fn get_dpop_key(&self, user_id: &str) -> Result<Option<Vec<u8>>> {
         let key_hex = if self.use_memory {
             let key = self.make_key(user_id, "dpop");
-            MEMORY_VAULT.lock().unwrap().get(&key).cloned()
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .cloned()
         } else {
             let dpop_service = format!("{}-dpop", self.service);
             let entry = Entry::new(&dpop_service, user_id)?;
