@@ -88,7 +88,14 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     let _chromedriver_container = chromedriver_img
         .start()
         .await
-        .expect("Failed to start Chromedriver");
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start Chromedriver container. Is Docker running and accessible? \
+                 If you are using a non-standard socket, try setting DOCKER_HOST (e.g., DOCKER_HOST=unix:///var/run/docker.sock). \
+                 Error: {:?}",
+                e
+            )
+        })?;
     let chrome_url = "http://localhost:4444";
 
     // 2. Setup Mock OIDC Server with UI and session tracking

@@ -32,7 +32,10 @@ impl Vault {
     pub fn store_token(&self, user_id: &str, token: &str) -> Result<()> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
-            MEMORY_VAULT.lock().unwrap().insert(key, token.to_string());
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, token.to_string());
             return Ok(());
         }
         let entry = Entry::new(&self.service, user_id)?;
@@ -45,7 +48,11 @@ impl Vault {
     pub fn get_token(&self, user_id: &str) -> Result<Option<String>> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
-            return Ok(MEMORY_VAULT.lock().unwrap().get(&key).cloned());
+            return Ok(MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .cloned());
         }
         let entry = Entry::new(&self.service, user_id)?;
         match entry.get_password() {
@@ -58,7 +65,10 @@ impl Vault {
     pub fn delete_token(&self, user_id: &str) -> Result<()> {
         if self.use_memory {
             let key = self.make_key(user_id, "token");
-            MEMORY_VAULT.lock().unwrap().remove(&key);
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
             return Ok(());
         }
         let entry = Entry::new(&self.service, user_id)?;
@@ -71,7 +81,10 @@ impl Vault {
         let key_hex = hex::encode(key_bytes);
         if self.use_memory {
             let key = self.make_key(user_id, "dpop");
-            MEMORY_VAULT.lock().unwrap().insert(key, key_hex);
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, key_hex);
             return Ok(());
         }
         let dpop_service = format!("{}-dpop", self.service);
@@ -86,7 +99,11 @@ impl Vault {
     pub fn get_dpop_key(&self, user_id: &str) -> Result<Option<Vec<u8>>> {
         let key_hex = if self.use_memory {
             let key = self.make_key(user_id, "dpop");
-            MEMORY_VAULT.lock().unwrap().get(&key).cloned()
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .cloned()
         } else {
             let dpop_service = format!("{}-dpop", self.service);
             let entry = Entry::new(&dpop_service, user_id)?;
@@ -132,6 +149,36 @@ mod tests {
         vault.delete_token(user)?;
         let deleted = vault.get_token(user)?;
         assert_eq!(deleted, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mutex_poison_recovery() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::new("mcp-passport-test");
+
+        // Poison the mutex by panicking while holding the lock
+        let _ = std::thread::spawn(|| {
+            let _lock = MEMORY_VAULT.lock().unwrap();
+            panic!("Poisoning the mutex");
+        })
+        .join();
+
+        // Verify it is indeed poisoned
+        assert!(MEMORY_VAULT.lock().is_err());
+
+        // Now try to use the vault. It should not panic because we handle poisoning.
+        let user = "test_user_poison";
+        let token = "token_after_poison";
+
+        vault.store_token(user, token)?;
+        let retrieved = vault.get_token(user)?;
+        assert_eq!(retrieved, Some(token.to_string()));
+
+        // Also test other operations
+        vault.delete_token(user)?;
+        assert_eq!(vault.get_token(user)?, None);
+
         Ok(())
     }
 
