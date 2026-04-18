@@ -100,4 +100,4 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: cobertura.xml
-          fail_ci_if_error: false # Changed to false to avoid blocking CI on Codecov failures
+          fail_ci_if_error: true

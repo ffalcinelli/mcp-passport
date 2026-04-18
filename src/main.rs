@@ -62,14 +62,14 @@ async fn main() -> Result<()> {
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
-    let proxy = Arc::new(Proxy::new(
+    let proxy = Proxy::new(
         &config.remote_mcp_url,
         &config.user_id,
         oidc_config,
         "mcp-passport",
         &config.mcp_protocol_version,
         config.auth_scheme,
-    ));
+    );
     let sse_url = config.remote_sse_url.clone();
 
     // Task 1: Persistent SSE Listener (Server -> Client)

@@ -90,9 +90,13 @@ impl AuthManager {
 
         let (auth_url, token_url, par_url) = if let Some(url) = discovery_url {
             info!("Fetching OIDC discovery from {}...", url);
-            let resp = http_client.get(url).send().await?;
+            let resp = http_client.get(url.clone()).send().await?;
             if !resp.status().is_success() {
-                anyhow::bail!("Failed to fetch discovery document: {}", resp.status());
+                anyhow::bail!(
+                    "Failed to fetch discovery document from {}: {}",
+                    url,
+                    resp.status()
+                );
             }
             let doc: DiscoveryDocument = resp.json().await?;
 
@@ -186,7 +190,29 @@ impl AuthManager {
             .copied()
             .context("Failed to parse redirect URL into socket address")?;
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let mut listener = None;
+        for i in 0..5 {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => {
+                    listener = Some(l);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    if i == 4 {
+                        return Err(anyhow::anyhow!(e).context(format!("Failed to bind to {} after 5 retries. Someone else is using this port.", addr)));
+                    }
+                    warn!(
+                        "Address {} already in use, retrying in 1s... (attempt {})",
+                        addr,
+                        i + 1
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        let listener = listener.unwrap();
         let local_addr = listener.local_addr()?;
 
         // Notify of bound address if requested (for tests)

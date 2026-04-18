@@ -36,4 +36,4 @@ The project is built on five core architectural pillars:
 - **Test All**: `cargo test`
 - **Compliance E2E**: `cargo test --test headless_compliance_test`
 - **Integration Only**: `cargo test --test integration_test`
-- **Coverage**: `cargo tarpaulin --ignore-config --ignore-tests -v`
+- **Coverage**: `cargo tarpaulin --out Xml --verbose` (Integrated with [Codecov](https://app.codecov.io/gh/ffalcinelli/mcp-passport))
