@@ -15,11 +15,14 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
-      - uses: taiki-e/create-gh-release-action@v1
-        with:
-          # (required) GitHub token for creating GitHub Releases.
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "Release ${{ github.ref_name }}" \
+            --generate-notes
 
   upload-assets:
     needs: create-release
@@ -43,18 +46,48 @@ jobs:
             build-tool: cargo
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4.2.2
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          # (required) Binary names (non-extension portion of filename) to build and upload.
-          bin: mcp-passport
-          # (optional) Target triple, default is host triple.
-          target: ${{ matrix.target }}
-          # (optional) Tool to build binaries.
-          build-tool: ${{ matrix.build-tool }}
-          # (optional) On which platform to distribute the `.tar.gz` file.
-          tar: unix
-          # (optional) On which platform to distribute the `.zip` file.
-          zip: windows
-          # (required) GitHub token for uploading assets to GitHub Releases.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          targets: ${{ matrix.target }}
+
+      - name: Install zigbuild
+        if: matrix.build-tool == 'cargo-zigbuild'
+        run: pip install cargo-zigbuild
+
+      - name: Build Binary
+        run: |
+          if [ "${{ matrix.build-tool }}" = "cargo-zigbuild" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package Binary
+        shell: bash
+        run: |
+          BIN_NAME="mcp-passport"
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            BIN_NAME="${BIN_NAME}.exe"
+          fi
+          
+          PKG_NAME="mcp-passport-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p dist
+          
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${BIN_NAME}"
+            cd dist && zip "../${PKG_NAME}.zip" "${BIN_NAME}"
+          else
+            cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${BIN_NAME}"
+            tar -czf "${PKG_NAME}.tar.gz" -C dist "${BIN_NAME}"
+          fi
+
+      - name: Upload Release Asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          ASSET=$(ls mcp-passport-${{ github.ref_name }}-${{ matrix.target }}.*)
+          gh release upload ${{ github.ref_name }} "$ASSET"

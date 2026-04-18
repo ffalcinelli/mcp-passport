@@ -17,21 +17,29 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0 # Fetch all tags
+          fetch-depth: 0
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true # Handle first run where gh-pages doesn't exist
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Determine Version
         id: version
@@ -44,32 +52,47 @@ jobs:
 
       - name: Generate Documentation
         run: |
-          cargo doc --no-deps --all-features --html-in-header docs-header.html
+          RUSTDOCFLAGS="--html-in-header docs-header.html" cargo doc --no-deps --all-features
 
       - name: Prepare Deployment Artifact
         run: |
+          # Initialize deploy dir with existing gh-pages content if it exists
+          mkdir -p target/deploy
+          if [ -d "gh-pages" ]; then
+            cp -r gh-pages/* target/deploy/
+            rm -rf target/deploy/.git
+          fi
+          
+          # Add new version
           VERSION_DIR="target/deploy/${{ steps.version.outputs.version }}"
           mkdir -p "$VERSION_DIR"
-          # Rustdoc output is in target/doc, we want it in target/deploy/<version>
           cp -r target/doc/* "$VERSION_DIR/"
           
           # Root redirector
           echo '<meta http-equiv="refresh" content="0; url=latest/mcp_passport/index.html">' > target/deploy/index.html
           
-          # Generate versions.json correctly
-          # Start the array
+          # Generate versions.json
           echo -n '["latest"' > target/deploy/versions.json
-          # Append each tag with a leading comma and quotes
           git tag -l 'v*' | sort -V -r | while read tag; do
             echo -n ", \"$tag\"" >> target/deploy/versions.json
           done
-          # Close the array
           echo -n ']' >> target/deploy/versions.json
 
-      - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          folder: target/deploy
-          branch: gh-pages
-          target-folder: .
-          clean: false
+          path: 'target/deploy'
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
