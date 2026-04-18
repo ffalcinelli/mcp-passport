@@ -156,6 +156,18 @@ async def handle_rpc(request: Request):
             }
         }
 
+    if method == "tools/call":
+        params = payload.get("params", {})
+        name = params.get("name")
+        if name == "mock_tool":
+            return {
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {
+                    "content": [{"type": "text", "text": f"Mock tool called successfully with args: {params.get('arguments')}"}]
+                }
+            }
+
     return {
         "jsonrpc": "2.0",
         "id": payload.get("id"),

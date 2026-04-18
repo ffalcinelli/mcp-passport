@@ -25,6 +25,7 @@ pub struct Proxy {
     session_id: Mutex<Option<String>>,
     reauth_mutex: Mutex<()>,
     last_reauth: Mutex<Option<std::time::Instant>>,
+    reauth_count: Arc<tokio::sync::RwLock<u64>>,
 }
 
 #[derive(Debug, Default)]
@@ -85,9 +86,9 @@ impl Proxy {
         service: &str,
         protocol_version: &str,
         auth_scheme: AuthScheme,
-    ) -> Self {
+    ) -> Arc<Self> {
         let (tx, rx) = watch::channel(false);
-        Self {
+        Arc::new(Self {
             http_client: Client::new(),
             remote_url: remote_url.to_string(),
             suspension_rx: rx,
@@ -101,7 +102,8 @@ impl Proxy {
             session_id: Mutex::new(None),
             reauth_mutex: Mutex::new(()),
             last_reauth: Mutex::new(None),
-        }
+            reauth_count: Arc::new(tokio::sync::RwLock::new(0)),
+        })
     }
 
     async fn ensure_auth_manager(&self, metadata_url: Option<&str>) -> Result<Arc<AuthManager>> {
@@ -286,7 +288,22 @@ impl Proxy {
         metadata_url: Option<&str>,
         scopes: Option<Vec<String>>,
     ) -> Result<()> {
+        let initial_count = { *self.reauth_count.read().await };
         let _guard = self.reauth_mutex.lock().await;
+
+        // Re-check if re-authentication is still needed after acquiring the lock.
+        // If another task just finished re-authenticating, the token in the vault will be different or present.
+        let current_token = self.vault.get_token(&self.user_id)?;
+        let current_count = { *self.reauth_count.read().await };
+        
+        debug!(
+            "Re-auth redundant check: failing={:?}, current={:?}, count={}/{}, scopes={:?}",
+            failing_token.map(|t| &t[..std::cmp::min(8, t.len())]),
+            current_token.as_deref().map(|t| &t[..std::cmp::min(8, t.len())]),
+            initial_count,
+            current_count,
+            scopes
+        );
 
         // If airlock is already active, someone else is handling it.
         // Wait for it to clear and then return.
@@ -297,9 +314,11 @@ impl Proxy {
             return Ok(());
         }
 
-        // Re-check if re-authentication is still needed after acquiring the lock.
-        // If another task just finished re-authenticating, the token in the vault will be different or present.
-        let current_token = self.vault.get_token(&self.user_id)?;
+        if current_count > initial_count && scopes.is_none() {
+            info!("Re-authentication occurred while waiting for lock. Skipping redundant re-auth.");
+            return Ok(());
+        }
+
         if let (Some(failing), Some(current)) = (failing_token, current_token.as_deref()) {
             if failing != current && scopes.is_none() {
                 info!(
@@ -315,13 +334,31 @@ impl Proxy {
         }
 
         // Circuit Breaker: prevent rapid consecutive re-authentications
-        // We check this ONLY if we've determined that we actually need to re-auth.
         let now = std::time::Instant::now();
         {
             let mut last = self.last_reauth.lock().await;
             if let Some(t) = *last {
-                if now.duration_since(t) < std::time::Duration::from_secs(2) {
-                    error!("Authentication loop detected. Re-authentication triggered too frequently (within 2s).");
+                let elapsed = now.duration_since(t);
+                
+                if elapsed < std::time::Duration::from_secs(5) {
+                    if current_count > initial_count {
+                         info!("Count increased during cooldown, skipping redundant re-auth.");
+                         return Ok(());
+                    }
+                    
+                    // If we just re-authenticated successfully (count increased), and we ALREADY HAVE a new token,
+                    // but we still got a 401, we should NOT re-auth immediately again.
+                    // This prevents infinite loops if the new token is being rejected.
+                    if current_count > 0 && current_token.is_some() {
+                        warn!("Fresh token was rejected. Skipping immediate re-auth to prevent loop.");
+                        return Ok(());
+                    }
+
+                    warn!("Re-authentication triggered very rapidly (within 5s).");
+                }
+                
+                if elapsed < std::time::Duration::from_secs(1) {
+                    error!("Authentication loop detected. Re-authentication triggered too frequently (within 1s).");
                     return Err(anyhow::anyhow!("Authentication loop detected. Please check your credentials and environment configuration."));
                 }
             }
@@ -331,9 +368,21 @@ impl Proxy {
         let _ = self.suspension_tx.send(true);
         info!("Airlock activated. Performing re-authentication...");
 
-        // Clear invalid token from vault to avoid re-using it (only if not a step-up scope request)
+        // Clear invalid token from vault ONLY if it's still the one failing and not a step-up
         if scopes.is_none() {
-            let _ = self.vault.delete_token(&self.user_id);
+            if let (Some(failing), Some(current)) = (failing_token, current_token.as_deref()) {
+                if failing == current {
+                    let _ = self.vault.delete_token(&self.user_id);
+                }
+            } else if failing_token.is_none() {
+                // If it was missing from the start, we don't need to delete anything,
+                // but we should check if it's still missing.
+                if current_token.is_some() {
+                     info!("Token appeared while preparing re-auth, skipping.");
+                     let _ = self.suspension_tx.send(false);
+                     return Ok(());
+                }
+            }
         }
 
         let auth_manager_res = self.ensure_auth_manager(metadata_url).await;
@@ -359,6 +408,10 @@ impl Proxy {
 
         match reauth_res {
             Ok(Ok(_)) => {
+                {
+                    let mut count = self.reauth_count.write().await;
+                    *count += 1;
+                }
                 info!("Re-authentication successful. Deactivating Airlock...");
                 let _ = self.suspension_tx.send(false);
                 Ok(())
@@ -405,6 +458,7 @@ impl Proxy {
             self.wait_for_airlock().await?;
 
             let token_opt = self.vault.get_token(&self.user_id)?;
+            let token_for_trigger = token_opt.clone();
 
             let mut request = if let Some(token) = token_opt.as_ref() {
                 let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
@@ -448,7 +502,6 @@ impl Proxy {
             let mut source = EventSource::new(request)?;
 
             while let Some(event) = source.next().await {
-                info!("SSE event received");
                 match event {
                     Ok(reqwest_eventsource::Event::Message(message)) => {
                         tracing::debug!(data = %message.data, "Received SSE message");
@@ -467,13 +520,13 @@ impl Proxy {
                                 })
                             });
 
-                            let failing_token = self.vault.get_token(&self.user_id)?;
-                            self.trigger_reauth(
-                                failing_token.as_deref(),
+                            if let Err(e) = self.trigger_reauth(
+                                token_for_trigger.as_deref(),
                                 metadata_url.as_deref(),
                                 challenge.scope,
-                            )
-                            .await?;
+                            ).await {
+                                error!("Re-authentication flow failed in SSE listener: {:?}. Retrying connection in 5s...", e);
+                            }
                             break;
                         } else {
                             error!(
@@ -493,7 +546,8 @@ impl Proxy {
             }
 
             warn!("SSE connection lost, retrying in 5 seconds...");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let jitter = rand::random::<u64>() % 2000;
+            tokio::time::sleep(std::time::Duration::from_millis(5000 + jitter)).await;
         }
     }
 }
