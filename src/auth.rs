@@ -1,3 +1,14 @@
+//! # OIDC/OAuth2 Authentication Manager
+//!
+//! This module implements the OpenID Connect (OIDC) flow with FAPI 2.0 security
+//! enhancements, including:
+//! - **Pushed Authorization Requests (PAR)**
+//! - **PKCE** (Proof Key for Code Exchange)
+//! - **DPoP** (Demonstrating Proof-of-Possession)
+//! - **RFC 8707 Resource Indicators**
+//!
+//! It also includes a local loopback server to handle the OAuth2 callback.
+
 use crate::crypto::DpopKey;
 use crate::vault::Vault;
 use crate::Result;
@@ -19,15 +30,24 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
+/// Configuration for the OIDC provider and local callback server.
 #[derive(Clone)]
 pub struct OidcConfig {
+    /// URL for OIDC discovery (.well-known/openid-configuration).
     pub discovery_url: Option<String>,
+    /// OIDC Client ID.
     pub client_id: String,
+    /// URL for the OAuth2 callback (must match provider configuration).
     pub redirect_url: String,
+    /// Optional override for the authorization endpoint.
     pub auth_url_override: Option<String>,
+    /// Optional override for the token endpoint.
     pub token_url_override: Option<String>,
+    /// Optional override for the PAR endpoint.
     pub par_url_override: Option<String>,
+    /// Internal channel to communicate the auth URL (used for automation/tests).
     pub internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    /// Internal channel to communicate the callback server address (used for automation/tests).
     pub internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
 }
 
@@ -41,17 +61,28 @@ impl std::fmt::Debug for OidcConfig {
     }
 }
 
+/// Manages OIDC discovery, token exchange, and the DPoP flow.
 #[derive(Clone)]
 pub struct AuthManager {
+    /// OIDC Client ID.
     client_id: String,
+    /// URL for the authorization endpoint.
     auth_url: String,
+    /// URL for the token endpoint.
     token_url: String,
+    /// URL for the PAR endpoint.
     par_url: String,
+    /// URL for the OAuth2 callback.
     redirect_url: String,
+    /// Resource indicator (MCP server URL).
     resource: String,
+    /// HTTP client for OIDC requests.
     http_client: HttpClient,
+    /// Secure vault for storing tokens.
     vault: Vault,
+    /// Internal channel to communicate the auth URL.
     internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    /// Internal channel to communicate the callback server address.
     internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
 }
 
@@ -76,6 +107,7 @@ struct ParResponse {
 }
 
 impl AuthManager {
+    /// Discovers OIDC endpoints via the discovery document or overrides.
     pub async fn discover(
         oidc_config: OidcConfig,
         resource: String,
@@ -383,6 +415,7 @@ impl AuthManager {
         Ok(())
     }
 
+    /// Retrieves the current access token for a user from the vault.
     pub fn get_token(&self, user_id: &str) -> Result<Option<String>> {
         self.vault.get_token(user_id)
     }

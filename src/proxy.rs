@@ -1,3 +1,9 @@
+//! # Transparent Layer 7 Bridge (Airlock)
+//!
+//! This module implements the core proxying logic between the AI client's stdio and the
+//! remote MCP server's HTTP/SSE interface. It features the "Airlock" mechanism
+//! for transparently handling authentication challenges without interrupting the client connection.
+
 use crate::auth::{AuthManager, OidcConfig};
 use crate::config::AuthScheme;
 use crate::crypto::DpopKey;
@@ -11,20 +17,35 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
+/// The main proxy engine that manages the connection and authentication state.
 pub struct Proxy {
+    /// The HTTP client used for proxying requests.
     http_client: Client,
+    /// The base URL of the remote MCP server.
     remote_url: String,
+    /// Receiver for the suspension state (Airlock status).
     suspension_rx: watch::Receiver<bool>,
+    /// Sender for the suspension state (Airlock status).
     suspension_tx: watch::Sender<bool>,
+    /// Secure vault for storing tokens and keys.
     vault: Vault,
+    /// Unique identifier for the current user.
     user_id: String,
+    /// OIDC configuration and metadata.
     oidc_config: OidcConfig,
+    /// Shared authentication manager (lazy-loaded).
     pub auth_manager: Arc<RwLock<Option<AuthManager>>>,
+    /// The MCP protocol version to use.
     protocol_version: String,
+    /// The authentication scheme (Bearer or DPoP).
     auth_scheme: AuthScheme,
+    /// Current session ID (for persistent SSE).
     session_id: Mutex<Option<String>>,
+    /// Mutex to prevent concurrent re-authentication attempts.
     reauth_mutex: Mutex<()>,
+    /// Timestamp of the last successful re-authentication.
     last_reauth: Mutex<Option<std::time::Instant>>,
+    /// Counter for re-authentication attempts.
     reauth_count: Arc<tokio::sync::RwLock<u64>>,
 }
 
@@ -78,6 +99,7 @@ fn extract_param(header: &str, param: &str) -> Option<String> {
 }
 
 impl Proxy {
+    /// Creates a new Proxy instance.
     pub fn new(
         remote_url: &str,
         user_id: &str,
@@ -141,7 +163,8 @@ impl Proxy {
         Ok(am_shared)
     }
 
-    /// Primary entry point for stdio -> HTTP bridge
+    /// Primary entry point for stdio -> HTTP bridge.
+    /// It reads JSON-RPC payloads, attaches DPoP-bound tokens, and manages the Airlock.
     pub async fn handle_request(self: Arc<Self>, payload: Value) -> Result<Value> {
         let mut retry_count = 0;
         let max_retries = 2;
@@ -452,7 +475,7 @@ impl Proxy {
         Ok(())
     }
 
-    /// Handles SSE events from the server and pipes them back to stdio
+    /// Handles SSE events from the server and pipes them back to stdio.
     pub async fn listen_sse(
         &self,
         sse_url: &str,

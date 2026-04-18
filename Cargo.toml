@@ -4,6 +4,12 @@ version = "0.0.1"
 edition = "2021"
 authors = ["Fabio Falcinelli <fabio.falcinelli@gmail.com>"]
 description = "Secure 1:1 transparent Layer 7 proxy for the Model Context Protocol (MCP)"
+readme = "README.md"
+homepage = "https://github.com/ffalcinelli/mcp-passport"
+repository = "https://github.com/ffalcinelli/mcp-passport"
+license = "MIT"
+keywords = ["mcp", "proxy", "oidc", "fapi", "security"]
+categories = ["network-programming", "cryptography"]
 
 [dependencies]
 # Async Runtime

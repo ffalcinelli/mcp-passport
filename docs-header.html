@@ -1,0 +1,55 @@
+<style>
+#version-selector {
+    padding: 10px;
+    background: #353535;
+    color: white;
+    text-align: right;
+    border-bottom: 1px solid #454545;
+}
+#version-selector select {
+    background: #252525;
+    color: white;
+    border: 1px solid #454545;
+    border-radius: 4px;
+    padding: 2px 5px;
+    margin-left: 10px;
+    cursor: pointer;
+}
+</style>
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    var repoName = "mcp-passport";
+    var rootPath = window.location.pathname.split("/" + repoName + "/")[0] + "/" + repoName + "/";
+    
+    fetch(rootPath + "versions.json")
+        .then(response => response.json())
+        .then(versions => {
+            var currentVersion = window.location.pathname.split("/" + repoName + "/")[1].split("/")[0];
+            
+            var selectorDiv = document.createElement("div");
+            selectorDiv.id = "version-selector";
+            selectorDiv.innerHTML = "Version: ";
+            
+            var select = document.createElement("select");
+            versions.forEach(function(v) {
+                var option = document.createElement("option");
+                option.value = v;
+                option.text = v;
+                if (v === currentVersion) {
+                    option.selected = true;
+                }
+                select.appendChild(option);
+            });
+            
+            select.onchange = function() {
+                var newVersion = this.value;
+                var currentPath = window.location.pathname.split("/" + repoName + "/" + currentVersion + "/")[1];
+                window.location.href = rootPath + newVersion + "/" + currentPath;
+            };
+            
+            selectorDiv.appendChild(select);
+            document.body.insertBefore(selectorDiv, document.body.firstChild);
+        })
+        .catch(err => console.error("Could not load versions.json", err));
+});
+</script>
