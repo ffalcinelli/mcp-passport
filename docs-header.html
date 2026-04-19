@@ -1,34 +1,64 @@
 <style>
 #version-selector {
-    padding: 10px;
-    background: #353535;
-    color: white;
-    text-align: right;
+    padding: 10px 15px;
     border-bottom: 1px solid #454545;
+    margin-bottom: 10px;
+    font-size: 0.85em;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+#version-selector label {
+    color: #888;
+    font-weight: 600;
+    white-space: nowrap;
+    margin-right: 10px;
 }
 #version-selector select {
-    background: #252525;
-    color: white;
+    background: #353535;
+    color: #eee;
     border: 1px solid #454545;
     border-radius: 4px;
     padding: 2px 5px;
-    margin-left: 10px;
     cursor: pointer;
+    outline: none;
+    flex-grow: 1;
+    max-width: 120px;
+}
+#version-selector select:hover {
+    border-color: #666;
 }
 </style>
 <script>
 document.addEventListener("DOMContentLoaded", function() {
-    var repoName = "mcp-passport";
-    var rootPath = window.location.pathname.split("/" + repoName + "/")[0] + "/" + repoName + "/";
+    var pathParts = window.location.pathname.split("/");
+    var versionIndex = -1;
+    
+    // Find the version segment (latest or vX.Y.Z)
+    for (var i = 0; i < pathParts.length; i++) {
+        if (pathParts[i] === "latest" || pathParts[i].match(/^v\d+/)) {
+            versionIndex = i;
+            break;
+        }
+    }
+
+    if (versionIndex === -1) return;
+
+    var currentVersion = pathParts[versionIndex];
+    // Ensure rootPath is absolute (starts with /)
+    var rootPath = "/" + pathParts.slice(1, versionIndex).join("/") + "/";
+    // Clean up double slashes if version is at the absolute root
+    rootPath = rootPath.replace(/\/+$/, "/");
     
     fetch(rootPath + "versions.json")
         .then(response => response.json())
         .then(versions => {
-            var currentVersion = window.location.pathname.split("/" + repoName + "/")[1].split("/")[0];
-            
             var selectorDiv = document.createElement("div");
             selectorDiv.id = "version-selector";
-            selectorDiv.innerHTML = "Version: ";
+            
+            var label = document.createElement("label");
+            label.innerHTML = "Version: ";
+            selectorDiv.appendChild(label);
             
             var select = document.createElement("select");
             versions.forEach(function(v) {
@@ -43,12 +73,29 @@ document.addEventListener("DOMContentLoaded", function() {
             
             select.onchange = function() {
                 var newVersion = this.value;
-                var currentPath = window.location.pathname.split("/" + repoName + "/" + currentVersion + "/")[1];
+                var currentPath = pathParts.slice(versionIndex + 1).join("/");
                 window.location.href = rootPath + newVersion + "/" + currentPath;
             };
             
             selectorDiv.appendChild(select);
-            document.body.insertBefore(selectorDiv, document.body.firstChild);
+            
+            function injectSelector() {
+                var sidebarCrate = document.querySelector(".sidebar .location") || document.querySelector(".sidebar-elems .location");
+                if (sidebarCrate) {
+                    sidebarCrate.after(selectorDiv);
+                    return true;
+                }
+                return false;
+            }
+
+            if (!injectSelector()) {
+                var sidebar = document.querySelector(".sidebar");
+                if (sidebar) {
+                    sidebar.prepend(selectorDiv);
+                } else {
+                    document.body.insertBefore(selectorDiv, document.body.firstChild);
+                }
+            }
         })
         .catch(err => console.error("Could not load versions.json", err));
 });
