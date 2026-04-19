@@ -36,6 +36,11 @@ To help us address the issue quickly, please include:
 
 If you find a bypass in our implementation of these protocols, please report it immediately.
 
+## Security Considerations
+
+### Local Machine Trust
+The proxy communicates with the AI Client via local `stdio`. The security model assumes the local machine is safe. If a user's machine is compromised, local malware could bypass the network authentication by simply hijacking the `stdio` pipeline or querying the OS Vault while unlocked.
+
 ## Disclosure Policy
 
 We follow a responsible disclosure policy:

@@ -108,6 +108,11 @@ When Claude starts the server, `mcp-passport` will output an authentication URL 
 
 > **Note on Auth Scheme**: The MCP spec requires `Authorization: Bearer <token>`. `mcp-passport` uses this by default while still sending the `DPoP` proof header for FAPI 2.0 security. Use `dpop` scheme only if the remote server explicitly requires it.
 
+## 🛡️ Security Considerations
+
+### Local Machine Trust
+The proxy communicates with the AI Client via local `stdio`. The security model assumes the local machine is safe. If a user's machine is compromised, local malware could bypass the network authentication by simply hijacking the `stdio` pipeline or querying the OS Vault while unlocked.
+
 ## 🛠️ Development & Testing
 
 ### Running Tests
