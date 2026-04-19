@@ -582,8 +582,9 @@ impl Proxy {
             }
 
             warn!("SSE connection lost, retrying in 5 seconds...");
+            let base_delay = if cfg!(test) { 10 } else { 5000 };
             let jitter = rand::rng().random::<u64>() % 2000;
-            tokio::time::sleep(std::time::Duration::from_millis(5000 + jitter)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(base_delay + jitter)).await;
         }
     }
 }

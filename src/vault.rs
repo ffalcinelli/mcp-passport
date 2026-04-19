@@ -216,4 +216,21 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_vault_dpop_hex_failure() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::new("mcp-passport-test");
+        let user = "test_user_bad_hex";
+        
+        // Directly inject invalid hex into MEMORY_VAULT
+        let key = vault.make_key(user, "dpop");
+        MEMORY_VAULT.lock().unwrap_or_else(|e| e.into_inner()).insert(key, "invalid hex".to_string());
+        
+        let res = vault.get_dpop_key(user);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.err().unwrap()).contains("Failed to decode DPoP key hex"));
+        
+        Ok(())
+    }
 }

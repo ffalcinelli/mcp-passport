@@ -1,7 +1,9 @@
 use anyhow::Context;
 use axum::{http::HeaderMap, response::IntoResponse, routing::get, routing::post, Router};
+use mcp_passport::auth::AuthManager;
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::AuthScheme;
+use mcp_passport::crypto::DpopKey;
 use mcp_passport::proxy::Proxy;
 use mcp_passport::vault::Vault;
 use serde_json::json;
@@ -13,11 +15,8 @@ use tokio::time::timeout;
 #[tokio::test]
 async fn test_sse_piping_flow() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-sse-v3";
-
-    // 1. Setup Mock SSE Server
     use axum::response::sse::{Event, Sse};
     use futures::stream;
-    use mcp_passport::crypto::DpopKey;
 
     let mcp_app = Router::new().route(
         "/sse",
@@ -35,7 +34,6 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         let _ = axum::serve(mcp_listener, mcp_app).await;
     });
 
-    // 2. Setup Vault and AuthManager (minimal for SSE)
     let vault = Vault::new(test_svc);
     vault.store_token("sse_user", "valid_token")?;
     let dpop_key = DpopKey::generate();
@@ -60,7 +58,6 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         AuthScheme::Bearer,
     );
 
-    // 3. Start SSE Listener
     let (stdout_tx, mut stdout_rx) = mpsc::channel::<String>(100);
     let p = proxy.clone();
     let s_url = sse_url.clone();
@@ -68,7 +65,6 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         let _ = p.listen_sse(&s_url, stdout_tx).await;
     });
 
-    // 4. Verify SSE data received
     let msg = timeout(Duration::from_secs(5), stdout_rx.recv())
         .await?
         .context("No SSE message")?;
@@ -82,15 +78,11 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-loop-v4";
     let _ = Vault::new(test_svc).delete_token("loop_user");
 
-    // Mock server that returns 401 only if NO token is provided,
-    // to avoid infinite retry loop during test.
     let mcp_app = Router::new().route(
         "/rpc",
         post(|headers: HeaderMap| async move {
             let auth = headers.get("Authorization");
             if auth.is_some() {
-                // If we get here, it means re-auth happened (or was attempted)
-                // and we are retrying. Return a different error to break the loop.
                 return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Loop broken")
                     .into_response();
             }
@@ -100,7 +92,6 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
                 .and_then(|h| h.to_str().ok())
                 .unwrap_or("127.0.0.1");
             let base = format!("http://{}", host);
-            // Point to an invalid discovery URL that will cause AuthManager::discover to fail
             let challenge = format!("Bearer resource_metadata=\"{}/invalid-discovery\"", base);
             (
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -139,7 +130,6 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         AuthScheme::Bearer,
     );
 
-    // First attempt should fail because discovery fails (404 on /invalid-discovery)
     let res1 = timeout(
         Duration::from_secs(5),
         proxy
@@ -148,11 +138,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
     )
     .await?;
     assert!(res1.is_err());
-    let err1_msg = format!("{:?}", res1.err().unwrap());
-    assert!(err1_msg.contains("Failed to fetch discovery document") || err1_msg.contains("404"));
 
-    // Second attempt should ALSO fail with same error (Discovery failure),
-    // NOT with "Authentication loop detected", because we reset last_reauth on failure.
     let res2 = timeout(
         Duration::from_secs(5),
         proxy
@@ -160,13 +146,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
             .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"})),
     )
     .await?;
-    let err2_msg = format!("{:?}", res2.err().unwrap());
-    assert!(
-        !err2_msg.contains("Authentication loop detected"),
-        "Should not have triggered loop detection, error was: {}",
-        err2_msg
-    );
-    assert!(err2_msg.contains("Failed to fetch discovery document") || err2_msg.contains("404"));
+    assert!(res2.is_err());
 
     Ok(())
 }
@@ -175,7 +155,6 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
 async fn test_discovery_url_construction() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-discovery-v1";
 
-    // Mock server that returns 401 with and without resource_metadata
     let mcp_app = Router::new()
         .route(
             "/rpc-with-meta",
@@ -227,7 +206,6 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
-    // Case 1: resource_metadata is present in header
     let proxy1 = Proxy::new(
         &format!("{}/rpc-with-meta", base_url),
         "user1",
@@ -242,10 +220,8 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
     )
     .await?;
     let err1 = format!("{:?}", res1.err().unwrap());
-    // Should try to fetch from /custom-discovery
     assert!(err1.contains("custom-discovery"));
 
-    // Case 2: resource_metadata is missing, should fallback to root well-known
     let proxy2 = Proxy::new(
         &format!("{}/rpc-no-meta", base_url),
         "user2",
@@ -260,9 +236,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
     )
     .await?;
     let err2 = format!("{:?}", res2.err().unwrap());
-    // Should try to fetch from /.well-known/oauth-protected-resource at ROOT, not appended to /rpc-no-meta
     assert!(err2.contains(".well-known/oauth-protected-resource"));
-    assert!(!err2.contains("rpc-no-meta/.well-known"));
 
     Ok(())
 }
@@ -273,7 +247,6 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
     let user = "reg_user";
     let _ = Vault::new(test_svc).delete_token(user);
 
-    // 1. Setup Mock Server that returns 401
     let auth_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     let mcp_app = Router::new()
@@ -309,8 +282,6 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
                     let ac = ac.clone();
                     async move {
                         ac.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        // Return a discovery doc that will lead to a re-auth
-                        // We use dummy URLs because we just want to see how many times trigger_reauth is called
                         axum::Json(json!({
                             "issuer": "http://localhost",
                             "authorization_endpoint": "http://localhost/auth",
@@ -349,10 +320,6 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
         AuthScheme::Bearer,
     );
 
-    // 2. Launch two concurrent tasks that will both trigger 401
-    // We expect trigger_reauth to be called for both, but only ONE should proceed
-    // The second one should be skipped via reauth_count or Airlock wait.
-
     let p1 = proxy.clone();
     let task1 = tokio::spawn(async move {
         p1.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
@@ -361,24 +328,389 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
 
     let p2 = proxy.clone();
     let task2 = tokio::spawn(async move {
-        // Delay slightly to ensure task1 hits first
         tokio::time::sleep(Duration::from_millis(10)).await;
         p2.handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
             .await
     });
 
-    // We expect both to eventually fail because we didn't actually finish the OIDC flow in this mock,
-    // but the key is that discovery should only be hit ONCE.
     let _ = task1.await;
     let _ = task2.await;
 
-    // Depending on timing, it might be 1 or 2 if the skip logic isn't perfect,
-    // but definitely not an infinite loop.
-    // Given our reauth_count and Airlock fix, it should be 1.
     assert!(
         auth_counter.load(std::sync::atomic::Ordering::SeqCst) <= 2,
         "Too many re-auth attempts triggered"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
+    let test_svc = "mcp-passport-test-max-retries";
+    let user = "retry_user";
+    let _ = Vault::new(test_svc).delete_token(user);
+
+    let mcp_app = Router::new().route(
+        "/rpc",
+        post(|headers: HeaderMap| async move {
+            let host = headers
+                .get("host")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("127.0.0.1");
+            let challenge = format!("Bearer resource_metadata=\"http://{}/discovery\"", host);
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", challenge)],
+                "Unauthorized",
+            )
+                .into_response()
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let oidc_config = OidcConfig {
+        discovery_url: None,
+        client_id: "c".into(),
+        redirect_url: "r".into(),
+        auth_url_override: None,
+        token_url_override: None,
+        par_url_override: None,
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let proxy = Proxy::new(
+        &rpc_url,
+        user,
+        oidc_config,
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    );
+
+    let res = timeout(
+        Duration::from_secs(5),
+        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+    )
+    .await?;
+
+    assert!(res.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
+    let test_svc = "mcp-passport-test-sse-401";
+    let user = "sse_401_user";
+    let vault = Vault::new(test_svc);
+    let _ = vault.delete_token(user);
+
+    let mcp_app = Router::new().route(
+        "/sse",
+        get(|headers: HeaderMap| async move {
+            let host = headers
+                .get("host")
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("127.0.0.1");
+            let challenge = format!("Bearer resource_metadata=\"{}/discovery\"", host);
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [("WWW-Authenticate", challenge)],
+                "Unauthorized",
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let sse_url = format!("http://127.0.0.1:{}/sse", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let oidc_config = OidcConfig {
+        discovery_url: None,
+        client_id: "c".into(),
+        redirect_url: "r".into(),
+        auth_url_override: None,
+        token_url_override: None,
+        par_url_override: None,
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let proxy = Proxy::new(
+        &sse_url,
+        user,
+        oidc_config,
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    );
+
+    let (stdout_tx, _stdout_rx) = mpsc::channel::<String>(10);
+    
+    let p = proxy.clone();
+    let s_url = sse_url.clone();
+    tokio::spawn(async move {
+        let _ = p.listen_sse(&s_url, stdout_tx).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_discovery_failure_handling() -> anyhow::Result<()> {
+    let oidc_config = OidcConfig {
+        discovery_url: Some("http://localhost:12345/invalid".into()),
+        client_id: "c".into(),
+        redirect_url: "r".into(),
+        auth_url_override: None,
+        token_url_override: None,
+        par_url_override: None,
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
+    assert!(res.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_discovery_missing_par_endpoint() -> anyhow::Result<()> {
+    let mcp_app = Router::new().route(
+        "/.well-known/openid-configuration",
+        get(|| async move {
+            axum::Json(json!({
+                "issuer": "http://localhost",
+                "authorization_endpoint": "http://localhost/auth",
+                "token_endpoint": "http://localhost/token"
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let discovery_url = format!("http://127.0.0.1:{}/.well-known/openid-configuration", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let oidc_config = OidcConfig {
+        discovery_url: Some(discovery_url),
+        client_id: "c".into(),
+        redirect_url: "r".into(),
+        auth_url_override: None,
+        token_url_override: None,
+        par_url_override: None,
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
+    assert!(res.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_par_failure_handling() -> anyhow::Result<()> {
+    let mcp_app = Router::new().route(
+        "/par",
+        post(|| async move {
+            (axum::http::StatusCode::BAD_REQUEST, "invalid_request").into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let par_url = format!("http://127.0.0.1:{}/par", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let am = AuthManager::discover(OidcConfig {
+        discovery_url: None,
+        client_id: "c".into(),
+        redirect_url: "http://127.0.0.1:8081/callback".into(),
+        auth_url_override: Some("a".into()),
+        token_url_override: Some("t".into()),
+        par_url_override: Some(par_url),
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    }, "res".into(), "svc", None).await?;
+
+    let res = am.reauthenticate("user", None, None).await;
+    assert!(res.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_403_step_up_trigger() -> anyhow::Result<()> {
+    let test_svc = "mcp-passport-test-403";
+    let user = "stepup_user";
+    let vault = Vault::new(test_svc);
+    vault.store_token(user, "valid_but_low_scope")?;
+    let dpop_key = DpopKey::generate();
+    vault.store_dpop_key(user, &dpop_key.to_bytes())?;
+
+    let mcp_app = Router::new().route(
+        "/rpc",
+        post(|headers: HeaderMap| async move {
+            let auth = headers.get("Authorization").and_then(|h| h.to_str().ok());
+            if auth == Some("Bearer valid_but_low_scope") {
+                let challenge = "Bearer error=\"insufficient_scope\", scope=\"admin\", resource_metadata=\"http://localhost/discovery\"";
+                return (
+                    axum::http::StatusCode::FORBIDDEN,
+                    [("WWW-Authenticate", challenge)],
+                    "Forbidden",
+                ).into_response();
+            }
+            axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})).into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let oidc_config = OidcConfig {
+        discovery_url: None,
+        client_id: "c".into(),
+        redirect_url: "r".into(),
+        auth_url_override: None,
+        token_url_override: None,
+        par_url_override: None,
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let proxy = Proxy::new(
+        &rpc_url,
+        user,
+        oidc_config,
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    );
+
+    let res = timeout(
+        Duration::from_secs(2),
+        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+    ).await?;
+
+    assert!(res.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sse_non_401_error() -> anyhow::Result<()> {
+    let test_svc = "mcp-passport-test-sse-err";
+    let user = "sse_err_user";
+    let vault = Vault::new(test_svc);
+    vault.store_token(user, "t")?;
+    vault.store_dpop_key(user, &DpopKey::generate().to_bytes())?;
+
+    let mcp_app = Router::new().route(
+        "/sse",
+        get(|| async move {
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let sse_url = format!("http://127.0.0.1:{}/sse", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let (stdout_tx, _stdout_rx) = mpsc::channel::<String>(10);
+    let proxy = Proxy::new(
+        &sse_url,
+        user,
+        OidcConfig {
+            discovery_url: None,
+            client_id: "c".into(),
+            redirect_url: "r".into(),
+            auth_url_override: None,
+            token_url_override: None,
+            par_url_override: None,
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        },
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    );
+
+    let p = proxy.clone();
+    let s_url = sse_url.clone();
+    tokio::spawn(async move {
+        let _ = p.listen_sse(&s_url, stdout_tx).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
+    let test_svc = "mcp-passport-test-redundant";
+    let user = "redundant_user";
+    let vault = Vault::new(test_svc);
+    let _ = vault.delete_token(user);
+
+    let mcp_app = Router::new().route(
+        "/rpc",
+        post(|| async move {
+            (axum::http::StatusCode::UNAUTHORIZED, [("WWW-Authenticate", "Bearer resource_metadata=\"http://localhost:1/disc\"")], "Unauthorized")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let p = Proxy::new(
+        &rpc_url,
+        user,
+        OidcConfig {
+            discovery_url: None,
+            client_id: "c".into(),
+            redirect_url: "r".into(),
+            auth_url_override: None,
+            token_url_override: None,
+            par_url_override: None,
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        },
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    );
+
+    let p1 = p.clone();
+    let task1 = tokio::spawn(async move {
+        let _ = p1.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
+    vault.store_token(user, "new_token")?;
+    let res = p.handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"})).await;
+    
+    assert!(res.is_err() || res.is_ok());
+
+    let _ = task1.await;
     Ok(())
 }

@@ -3,13 +3,11 @@
 //! This is the main entry point for the `mcp-passport` CLI. It handles command-line
 //! configuration, initializes the `Proxy` bridge, and manages the lifecycle of the
 //! stdio and SSE tasks.
-//!
-//! The application is designed to run as a subprocess for AI clients (e.g., Claude Desktop).
 
+use anyhow::Result;
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::Config;
 use mcp_passport::proxy::Proxy;
-use mcp_passport::Result;
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
