@@ -10,13 +10,13 @@ use crate::crypto::DpopKey;
 use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
+use rand::Rng;
 use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use url::Url;
-use rand::Rng;
 
 /// The main proxy engine that manages the connection and authentication state.
 pub struct Proxy {
