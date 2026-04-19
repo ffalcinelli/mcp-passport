@@ -10,6 +10,7 @@ use crate::crypto::DpopKey;
 use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
+use rand::Rng;
 use reqwest::{header::HeaderMap, Client, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
@@ -581,7 +582,7 @@ impl Proxy {
             }
 
             warn!("SSE connection lost, retrying in 5 seconds...");
-            let jitter = rand::random::<u64>() % 2000;
+            let jitter = rand::rng().random::<u64>() % 2000;
             tokio::time::sleep(std::time::Duration::from_millis(5000 + jitter)).await;
         }
     }
