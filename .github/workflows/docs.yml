@@ -2,8 +2,8 @@ name: Documentation
 
 on:
   push:
-    branches: ["main"]
-    tags: ["v*"]
+    branches: [ "main" ]
+    tags: [ "v*" ]
   workflow_dispatch:
 
 permissions:
@@ -61,7 +61,7 @@ jobs:
           # Initialize deploy dir with existing gh-pages content if it exists
           mkdir -p target/deploy
           if [ -d "gh-pages" ]; then
-            cp -r gh-pages/* target/deploy/
+            cp -r gh-pages/. target/deploy/
             rm -rf target/deploy/.git
           fi
           
