@@ -23,6 +23,7 @@ def validate_dpop_proof(dpop: str, method: str, url: str, access_token: str):
         raise HTTPException(status_code=401, detail="Missing DPoP header")
     
     try:
+        # 1. Peek at the header to get the JWK
         header = jwt.get_unverified_header(dpop)
         if header.get("typ") != "dpop+jwt":
             raise HTTPException(status_code=401, detail="Invalid DPoP typ")
@@ -31,10 +32,16 @@ def validate_dpop_proof(dpop: str, method: str, url: str, access_token: str):
         if not jwk_data:
             raise HTTPException(status_code=401, detail="Missing JWK in DPoP header")
             
-        alg = jwt.algorithms.ECAlgorithm(jwt.algorithms.ECAlgorithm.SHA256)
-        public_key = alg.from_jwk(json.dumps(jwk_data))
+        # 2. Convert JWK to public key for validation
+        public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(jwk_data))
         
-        payload = jwt.decode(dpop, public_key, algorithms=["ES256"])
+        # 3. Decode and validate (PyJWT >= 2.12.0 handles 'crit' automatically if present)
+        payload = jwt.decode(
+            dpop, 
+            public_key, 
+            algorithms=["ES256"],
+            options={"require": ["jti", "htm", "htu", "iat"]}
+        )
         
         if payload.get("htm") != method:
             raise HTTPException(status_code=401, detail="Invalid htm in DPoP proof")

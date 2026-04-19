@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use url::Url;
+use rand::Rng;
 
 /// The main proxy engine that manages the connection and authentication state.
 pub struct Proxy {
@@ -581,7 +582,7 @@ impl Proxy {
             }
 
             warn!("SSE connection lost, retrying in 5 seconds...");
-            let jitter = rand::random::<u64>() % 2000;
+            let jitter = rand::rng().random::<u64>() % 2000;
             tokio::time::sleep(std::time::Duration::from_millis(5000 + jitter)).await;
         }
     }
