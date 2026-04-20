@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod proxy;
+pub mod templates;
 pub mod vault;
 
 use crate::auth::OidcConfig;
@@ -46,6 +47,7 @@ where
         par_url_override: config.kc_par_url.clone(),
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: config.template_dir.clone(),
     };
 
     let proxy = Proxy::new(
@@ -163,6 +165,7 @@ mod tests {
                 par_url_override: None,
                 internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
             },
             "svc",
             "v1",
@@ -188,6 +191,7 @@ mod tests {
                 par_url_override: None,
                 internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
             },
             "svc",
             "v1",
@@ -231,6 +235,8 @@ mod tests {
             kc_token_url: Some("http://localhost:1/token".into()),
             kc_par_url: Some("http://localhost:1/par".into()),
             log_level: "info".into(),
+            log_dir: "/tmp/mcp-passport".into(),
+            template_dir: None,
             mcp_protocol_version: "2025-11-25".into(),
             auth_scheme: AuthScheme::Bearer,
         };

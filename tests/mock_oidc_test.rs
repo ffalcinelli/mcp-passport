@@ -48,6 +48,7 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         par_url_override: Some("p".into()),
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
     let proxy = Proxy::new(
         "http://unused",
@@ -119,6 +120,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(
@@ -204,6 +206,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy1 = Proxy::new(
@@ -309,6 +312,7 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(
@@ -384,6 +388,7 @@ async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(
@@ -444,6 +449,7 @@ async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(
@@ -478,6 +484,7 @@ async fn test_discovery_failure_handling() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
@@ -516,6 +523,7 @@ async fn test_discovery_missing_par_endpoint() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
@@ -549,6 +557,7 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
             par_url_override: Some(par_url),
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
         },
         "res".into(),
         "svc",
@@ -622,6 +631,7 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(
@@ -676,6 +686,7 @@ async fn test_sse_non_401_error() -> anyhow::Result<()> {
             par_url_override: None,
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
         },
         test_svc,
         "2025-11-25",
@@ -731,6 +742,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
             par_url_override: None,
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
         },
         test_svc,
         "2025-11-25",
@@ -797,6 +809,7 @@ async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
             par_url_override: None,
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
         },
         test_svc,
         "2025-11-25",
@@ -857,6 +870,7 @@ async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
         par_url_override: Some("p".into()),
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(
