@@ -71,7 +71,11 @@ pub struct Config {
     pub auth_scheme: AuthScheme,
 
     /// Directory for logs
-    #[arg(long, env = "MCP_PASSPORT_LOG_DIR", default_value = "/tmp/mcp-passport")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_LOG_DIR",
+        default_value = "/tmp/mcp-passport"
+    )]
     pub log_dir: String,
 
     /// Directory containing success.html and failure.html for the auth callback

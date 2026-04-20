@@ -1,4 +1,3 @@
-use clap::Parser;
 use mcp_passport::config::Config;
 use tracing::info;
 use tracing_subscriber::fmt;
