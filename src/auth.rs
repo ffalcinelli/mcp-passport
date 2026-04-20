@@ -160,7 +160,7 @@ impl AuthManager {
             let par = oidc_config.par_url_override.clone().or(doc.pushed_authorization_request_endpoint)
                 .context("Discovery document missing pushed_authorization_request_endpoint and no override provided")?;
 
-            let name = doc.organization_name.unwrap_or_else(|| doc.issuer);
+            let name = doc.organization_name.unwrap_or(doc.issuer);
             (auth, token, par, name)
         } else {
             let auth = oidc_config
@@ -519,11 +519,7 @@ async fn handle_callback(
         html = html.replace("{{ERROR_MESSAGE}}", "Already authenticated or timed out.");
         html = html.replace("{{ISSUER_NAME}}", &state.issuer_name);
         html = html.replace("{{RESOURCE_NAME}}", &state.resource_name);
-        (
-            axum::http::StatusCode::GONE,
-            axum::response::Html(html),
-        )
-            .into_response()
+        (axum::http::StatusCode::GONE, axum::response::Html(html)).into_response()
     }
 }
 
