@@ -132,6 +132,13 @@ mod tests {
     }
 
     #[test]
+    fn test_dpop_key_invalid_bytes() {
+        let res = DpopKey::from_bytes(&[1, 2, 3]);
+        assert!(res.is_err());
+        assert!(format!("{:?}", res.err().unwrap()).contains("Invalid DPoP key bytes"));
+    }
+
+    #[test]
     fn test_public_jwk() {
         let key = DpopKey::generate();
         let jwk = key.public_jwk();

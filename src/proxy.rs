@@ -309,7 +309,7 @@ impl Proxy {
         }
     }
 
-    async fn trigger_reauth(
+    pub async fn trigger_reauth(
         &self,
         failing_token: Option<&str>,
         metadata_url: Option<&str>,
@@ -432,7 +432,7 @@ impl Proxy {
         };
 
         let reauth_res = tokio::time::timeout(
-            std::time::Duration::from_secs(300), // 5 minute timeout for user to login
+            std::time::Duration::from_secs(if cfg!(test) { 1 } else { 300 }), // 5 minute timeout for user to login
             auth_manager.reauthenticate(&self.user_id, scopes, None),
         )
         .await;
@@ -582,8 +582,10 @@ impl Proxy {
             }
 
             warn!("SSE connection lost, retrying in 5 seconds...");
-            let jitter = rand::rng().random::<u64>() % 2000;
-            tokio::time::sleep(std::time::Duration::from_millis(5000 + jitter)).await;
+            let base_delay = if cfg!(test) { 10 } else { 5000 };
+            let jitter_max = if cfg!(test) { 10 } else { 2000 };
+            let jitter = rand::rng().random::<u64>() % jitter_max;
+            tokio::time::sleep(std::time::Duration::from_millis(base_delay + jitter)).await;
         }
     }
 }
@@ -591,6 +593,7 @@ impl Proxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{routing::post, Router};
     use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
 
     #[test]
@@ -628,6 +631,59 @@ mod tests {
     }
 
     #[test]
+    fn test_www_authenticate_parse_full() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static(
+                "Bearer error=\"insufficient_scope\", scope=\"admin\", resource_metadata=\"http://localhost/discovery\"",
+            ),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(challenge.error, Some("insufficient_scope".to_string()));
+        assert_eq!(challenge.scope, Some(vec!["admin".to_string()]));
+        assert_eq!(
+            challenge.resource_metadata,
+            Some("http://localhost/discovery".to_string())
+        );
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_multiple_scopes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer scope=\"read write admin\""),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(
+            challenge.scope,
+            Some(vec![
+                "read".to_string(),
+                "write".to_string(),
+                "admin".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_unquoted_error() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer error=invalid_token, scope=mcp:all"),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(challenge.error, Some("invalid_token".to_string()));
+        assert_eq!(challenge.scope, Some(vec!["mcp:all".to_string()]));
+    }
+
+    #[test]
+    fn test_extract_param_not_found() {
+        assert_eq!(extract_param("Bearer scope=all", "error"), None);
+    }
+
+    #[test]
     fn test_url_joining_behavior() {
         let remote_url = "http://localhost:8081/rpc";
         let u = Url::parse(remote_url).unwrap();
@@ -644,5 +700,356 @@ mod tests {
             joined.as_str(),
             "http://localhost:8081/.well-known/oauth-protected-resource"
         );
+    }
+
+    #[test]
+    fn test_extract_param_quoted_with_comma() {
+        let val = "Bearer scope=\"a,b,c\", error=\"err\"";
+        assert_eq!(extract_param(val, "scope"), Some("a,b,c".to_string()));
+        assert_eq!(extract_param(val, "error"), Some("err".to_string()));
+    }
+
+    #[test]
+    fn test_extract_param_unquoted_with_comma() {
+        let val = "Bearer scope=a,b,c, error=err";
+        assert_eq!(extract_param(val, "scope"), Some("a".to_string())); // Stops at first comma
+    }
+
+    #[tokio::test]
+    async fn test_proxy_ensure_auth_manager_no_discovery() {
+        let proxy = Proxy::new(
+            "http://localhost",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+        // This should fail because no discovery and no overrides
+        let res = proxy.ensure_auth_manager(None).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_proxy_handle_request_max_retries() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: Some("http://localhost:1/auth".into()),
+                token_url_override: Some("http://localhost:1/token".into()),
+                par_url_override: Some("http://localhost:1/par".into()),
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        // This should fail immediately because URL is invalid and it will retry but fail.
+        let res = proxy
+            .handle_request(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+            .await;
+        assert!(res.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_handle_request_no_content() -> Result<()> {
+        let mcp_app = Router::new().route(
+            "/rpc",
+            post(|| async move { axum::http::StatusCode::NO_CONTENT }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mcp_app).await;
+        });
+
+        let proxy = Proxy::new(
+            &rpc_url,
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        let vault = Vault::new("svc");
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        vault.store_token("user", "token")?;
+        vault.store_dpop_key("user", &crate::crypto::DpopKey::generate().to_bytes())?;
+
+        let res = proxy
+            .handle_request(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+            .await?;
+        assert_eq!(res, serde_json::Value::Null);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_reauth_loop_detection() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: Some("http://localhost:1/auth".into()),
+                token_url_override: Some("http://localhost:1/token".into()),
+                par_url_override: Some("http://localhost:1/par".into()),
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        // First attempt will fail (ensure_auth_manager will fail)
+        let _ = proxy.trigger_reauth(None, None, None).await;
+
+        // Second attempt immediately should hit loop detection
+        let res = proxy.trigger_reauth(None, None, None).await;
+        assert!(res.is_ok()); // It returns Ok(()) and skips re-auth
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_trigger_reauth_already_active() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        // Manually activate airlock
+        let _ = proxy.suspension_tx.send(true);
+
+        // Deactivate airlock in background
+        let p = proxy.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = p.suspension_tx.send(false);
+        });
+
+        // trigger_reauth should wait for airlock to clear and then return Ok(())
+        let res = proxy.trigger_reauth(None, None, None).await;
+        assert!(res.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_wait_for_airlock() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        // Initially not suspended
+        let p = proxy.clone();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), p.wait_for_airlock())
+            .await?;
+
+        // Manually activate airlock
+        let _ = proxy.suspension_tx.send(true);
+        let p2 = proxy.clone();
+        let handle = tokio::spawn(async move {
+            let _ = p2.wait_for_airlock().await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = proxy.suspension_tx.send(false);
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), handle).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_trigger_reauth_cooldown() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        let vault = Vault::new("svc");
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        vault.store_token("user", "token")?;
+
+        // Set last_reauth to now and reauth_count to 1
+        {
+            let mut lr = proxy.last_reauth.lock().await;
+            *lr = Some(std::time::Instant::now());
+            let mut rc = proxy.reauth_count.write().await;
+            *rc = 1;
+        }
+
+        // trigger_reauth should return Ok(()) and warn about fresh token rejected
+        let res = proxy.trigger_reauth(Some("token"), None, None).await;
+        assert!(res.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_trigger_reauth_redundant_skip() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        let vault = Vault::new("svc");
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        vault.store_token("user", "new_token")?;
+
+        // trigger_reauth with an old failing token should skip re-auth if current token is different
+        let res = proxy.trigger_reauth(Some("old_token"), None, None).await;
+        assert!(res.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_listen_sse_retry_logic() -> Result<()> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        let p = proxy.clone();
+        let handle = tokio::spawn(async move {
+            let _ = p.listen_sse("http://localhost:1/sse", tx).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_listen_sse_failure() -> Result<()> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+        // It will retry infinitely, so we just want to see it starting and failing once.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            proxy.listen_sse("http://localhost:1/sse", tx),
+        )
+        .await;
+        assert!(res.is_err()); // Timeout means it's still retrying
+        Ok(())
     }
 }

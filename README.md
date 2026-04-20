@@ -1,6 +1,7 @@
 # mcp-passport 🛡️
 
 ![CI Status](https://github.com/ffalcinelli/mcp-passport/actions/workflows/ci.yml/badge.svg)
+[![codecov](https://codecov.io/gh/ffalcinelli/mcp-passport/graph/badge.svg)](https://codecov.io/gh/ffalcinelli/mcp-passport)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 

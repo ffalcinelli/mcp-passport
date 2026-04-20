@@ -70,6 +70,14 @@ pub struct Config {
     #[arg(long, env = "MCP_PASSPORT_AUTH_SCHEME", value_enum, default_value_t = AuthScheme::Bearer)]
     pub auth_scheme: AuthScheme,
 
+    /// Directory for logs
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_LOG_DIR",
+        default_value = "/tmp/mcp-passport"
+    )]
+    pub log_dir: String,
+
     /// Directory containing success.html and failure.html for the auth callback
     #[arg(long, env = "MCP_PASSPORT_TEMPLATE_DIR")]
     pub template_dir: Option<std::path::PathBuf>,
