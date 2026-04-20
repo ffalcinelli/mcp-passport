@@ -152,6 +152,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(

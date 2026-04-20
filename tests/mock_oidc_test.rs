@@ -50,6 +50,7 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         par_url_override: Some("p".into()),
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
     let proxy = Proxy::new(
         "http://unused",
@@ -128,6 +129,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(
@@ -225,6 +227,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     // Case 1: resource_metadata is present in header
@@ -338,6 +341,7 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(

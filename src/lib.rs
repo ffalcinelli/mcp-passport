@@ -14,6 +14,7 @@ pub mod auth;
 pub mod config;
 pub mod crypto;
 pub mod proxy;
+pub mod templates;
 pub mod vault;
 
 /// Shared result type for the crate.

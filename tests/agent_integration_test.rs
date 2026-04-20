@@ -135,6 +135,7 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(

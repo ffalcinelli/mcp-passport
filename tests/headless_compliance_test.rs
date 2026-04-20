@@ -118,6 +118,8 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
             let base = oidc_url_for_discovery.clone();
             async move {
                 Json(json!({
+                    "issuer": base.clone(),
+                    "organization_name": "Mock OIDC Provider",
                     "authorization_endpoint": format!("{}/auth", base),
                     "token_endpoint": format!("{}/token", base),
                     "pushed_authorization_request_endpoint": format!("{}/par", base)
@@ -171,6 +173,11 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     // 3. Setup Mock MCP Server
     let mcp_app = Router::new()
         .route("/rpc", post(mock_mcp_handler))
+        .route("/.well-known/oauth-protected-resource", get(|| async move {
+            Json(json!({
+                "resource_name": "Compliance Mock Resource"
+            }))
+        }))
         .with_state(McpState {
             metadata_url: format!("{}/discovery", oidc_url_for_mcp),
         });
@@ -193,6 +200,7 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
         par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(Some(url_tx))),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     // 5. Initialize Proxy
@@ -256,12 +264,18 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     client.find(Locator::Id("login")).await?.click().await?;
 
     // Wait for the redirect to happen (our loopback will handle it)
-    info!("Headless browser waiting for success message...");
+    info!("Headless browser waiting for success message and metadata...");
     match timeout(
         Duration::from_secs(30),
-        client.wait().for_element(Locator::XPath(
-            "//*[contains(text(), 'Authentication successful')]",
-        )),
+        async {
+            client.wait().for_element(Locator::XPath("//h1[contains(., 'Authentication Successful')]")).await?;
+            info!("Found h1 success message");
+            client.wait().for_element(Locator::XPath("//div[contains(., 'Mock OIDC Provider')]")).await?;
+            info!("Found OIDC provider metadata");
+            client.wait().for_element(Locator::XPath("//div[contains(., 'Compliance Mock Resource')]")).await?;
+            info!("Found Resource metadata");
+            Ok::<(), fantoccini::error::CmdError>(())
+        }
     )
     .await
     {
@@ -270,9 +284,9 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
             let cur = client.current_url().await?;
             let src = client.source().await?;
             error!(
-                "Timed out waiting for success. Current URL: {}. Source snippet: {}",
+                "Timed out waiting for success. Current URL: {}. Full source: {}",
                 cur,
-                &src[..src.len().min(500)]
+                src
             );
             panic!("Timeout waiting for success message");
         }

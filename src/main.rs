@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         par_url_override: config.kc_par_url.clone(),
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: config.template_dir.clone(),
     };
 
     let proxy = Proxy::new(

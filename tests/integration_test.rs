@@ -111,6 +111,7 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         par_url_override: Some(format!("{}/par", oidc_base)),
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
         internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        template_dir: None,
     };
 
     let proxy = Proxy::new(

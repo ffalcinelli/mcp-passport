@@ -29,6 +29,7 @@ All variables are prefixed with `MCP_PASSPORT_`.
 | Discovery URL | `MCP_PASSPORT_OIDC_DISCOVERY_URL` | The `.well-known/openid-configuration` URL. |
 | Client ID | `MCP_PASSPORT_OIDC_CLIENT_ID` | Your OIDC client ID (default: `mcp-passport`). |
 | Redirect URL | `MCP_PASSPORT_OIDC_REDIRECT_URL` | Local callback URL (default: `http://127.0.0.1:8082/callback`). |
+| Template Dir | `MCP_PASSPORT_TEMPLATE_DIR` | Directory containing custom `success.html` and `failure.html`. |
 
 ### CLI Overrides
 You can also use CLI flags (e.g., `--remote-mcp-url`) which take precedence over environment variables. Run `./mcp-passport --help` for the full list.
@@ -92,3 +93,11 @@ When you send a request and your token is missing or expired:
 3. Your default browser opens automatically to the login page.
 4. Once you log in, `mcp-passport` captures the code, exchanges it for a DPoP-bound token, and stores it securely.
 5. The suspended requests are automatically resumed and signed with the new credentials.
+
+## 7. Customizing Landing Pages
+By default, `mcp-passport` provides a clean, modern "Authentication Successful" or "Authentication Failed" page. You can customize these by providing a directory with your own HTML files:
+
+1. Create a directory (e.g., `my-templates/`).
+2. Add `success.html` and `failure.html`.
+3. In `failure.html`, you can use the `{{ERROR_MESSAGE}}` placeholder to display the specific error that occurred.
+4. Run `mcp-passport` with `--template-dir my-templates/` or set the `MCP_PASSPORT_TEMPLATE_DIR` environment variable.
