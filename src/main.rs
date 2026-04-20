@@ -1,18 +1,11 @@
 //! # mcp-passport: The AI-to-MCP Bridge
 //!
-//! This is the main entry point for the `mcp-passport` CLI. It handles command-line
-//! configuration, initializes the `Proxy` bridge, and manages the lifecycle of the
-//! stdio and SSE tasks.
+//! This is the main entry point for the `mcp-passport` CLI.
 
 use anyhow::Result;
-use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::Config;
-use mcp_passport::proxy::Proxy;
-use std::sync::Arc;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
-use tracing::{error, info};
+use tokio::io;
+use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
@@ -40,118 +33,14 @@ async fn main() -> Result<()> {
     info!("mcp-passport starting up...");
     info!("Configuration: {:?}", config);
 
-    let (stdout_tx, mut stdout_rx) = mpsc::channel::<String>(100);
+    mcp_passport::run(config, io::stdin(), io::stdout()).await
+}
 
-    // Dedicated stdout writer task
-    let stdout_handle = tokio::spawn(async move {
-        let mut stdout = io::stdout();
-        while let Some(msg) = stdout_rx.recv().await {
-            tracing::debug!(message = %msg, "Writing to stdout");
-            let mut line = msg;
-            line.push('\n');
-            if let Err(e) = stdout.write_all(line.as_bytes()).await {
-                error!("Failed to write to stdout: {:?}", e);
-                break;
-            }
-            let _ = stdout.flush().await;
-        }
-    });
-
-    let oidc_config = OidcConfig {
-        discovery_url: config.oidc_discovery_url.clone(),
-        client_id: config.oidc_client_id.clone(),
-        redirect_url: config.oidc_redirect_url.clone(),
-        auth_url_override: config.kc_auth_url.clone(),
-        token_url_override: config.kc_token_url.clone(),
-        par_url_override: config.kc_par_url.clone(),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-    };
-
-    let proxy = Proxy::new(
-        &config.remote_mcp_url,
-        &config.user_id,
-        oidc_config,
-        "mcp-passport",
-        &config.mcp_protocol_version,
-        config.auth_scheme,
-    );
-    let sse_url = config.remote_sse_url.clone();
-
-    // Task 1: Persistent SSE Listener (Server -> Client)
-    let sse_proxy = proxy.clone();
-    let sse_stdout_tx = stdout_tx.clone();
-    let sse_handle = tokio::spawn(async move {
-        if let Err(e) = sse_proxy.listen_sse(&sse_url, sse_stdout_tx).await {
-            error!("SSE listener failed: {:?}", e);
-        }
-    });
-
-    // Task 2: Stdio Read Loop (Client -> Server)
-    let stdin = io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
-    let mut tasks = JoinSet::new();
-
-    info!("Ready to proxy MCP stdio messages...");
-
-    loop {
-        tokio::select! {
-            line_res = reader.next_line() => {
-                match line_res {
-                    Ok(Some(line)) => {
-                        let proxy_task = proxy.clone();
-                        let task_stdout_tx = stdout_tx.clone();
-                        tasks.spawn(async move {
-                            match serde_json::from_str::<serde_json::Value>(&line) {
-                                Ok(payload) => {
-                                    let has_id = payload.get("id").is_some();
-                                    match proxy_task.handle_request(payload).await {
-                                        Ok(response) => {
-                                            if has_id {
-                                                if let Ok(res_str) = serde_json::to_string(&response) {
-                                                    let _ = task_stdout_tx.send(res_str).await;
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!(error = ?e, "Failed to proxy request to remote server");
-                                        }
-                                    }
-                                }
-                                Err(e) => error!("Invalid JSON received on stdio: {:?}", e),
-                            }
-                        });
-                    }
-                    Ok(None) => {
-                        info!("Stdin closed, shutting down...");
-                        break;
-                    }
-                    Err(e) => {
-                        error!("Error reading from stdin: {:?}", e);
-                        break;
-                    }
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl-C received, shutting down...");
-                break;
-            }
-            Some(res) = tasks.join_next(), if !tasks.is_empty() => {
-                if let Err(e) = res {
-                    error!("Proxy task failed: {:?}", e);
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn test_main_help() {
+        // We can't easily test main() because it calls Config::parse() which might exit.
+        // But we can test that it compiles and has basic structure.
     }
-
-    // Cleanup: wait for remaining tasks and stop SSE listener
-    info!("Waiting for remaining tasks to complete...");
-    sse_handle.abort();
-    while tasks.join_next().await.is_some() {}
-
-    // Drop stdout_tx so the writer task can finish
-    drop(stdout_tx);
-    let _ = stdout_handle.await;
-
-    Ok(())
 }

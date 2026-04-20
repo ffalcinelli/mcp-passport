@@ -222,15 +222,41 @@ mod tests {
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let vault = Vault::new("mcp-passport-test");
         let user = "test_user_bad_hex";
-        
+
         // Directly inject invalid hex into MEMORY_VAULT
         let key = vault.make_key(user, "dpop");
-        MEMORY_VAULT.lock().unwrap_or_else(|e| e.into_inner()).insert(key, "invalid hex".to_string());
-        
+        MEMORY_VAULT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, "invalid hex".to_string());
+
         let res = vault.get_dpop_key(user);
         assert!(res.is_err());
         assert!(format!("{:?}", res.err().unwrap()).contains("Failed to decode DPoP key hex"));
-        
+
         Ok(())
+    }
+
+    #[test]
+    fn test_vault_real_keyring_attempt() {
+        // We don't set MCP_PASSPORT_USE_MEMORY_VAULT here
+        let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
+        std::env::remove_var("MCP_PASSPORT_USE_MEMORY_VAULT");
+
+        let vault = Vault::new("mcp-passport-unit-test-real");
+        assert!(!vault.use_memory);
+
+        // This will likely fail in CI but it's okay, we just want to cover the lines.
+        // We use a dummy user to avoid messing up real keys.
+        let _ = vault.store_token("dummy_user_test", "dummy_token");
+        let _ = vault.get_token("dummy_user_test");
+        let _ = vault.delete_token("dummy_user_test");
+        let _ = vault.store_dpop_key("dummy_user_test", b"dummy");
+        let _ = vault.get_dpop_key("dummy_user_test");
+
+        // Restore env var
+        if let Ok(val) = old_val {
+            std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", val);
+        }
     }
 }

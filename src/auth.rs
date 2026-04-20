@@ -234,11 +234,16 @@ impl AuthManager {
                         return Err(anyhow::anyhow!(e).context(format!("Failed to bind to {} after 5 retries. Someone else is using this port.", addr)));
                     }
                     warn!(
-                        "Address {} already in use, retrying in 1s... (attempt {})",
+                        "Address {} already in use, retrying... (attempt {})",
                         addr,
                         i + 1
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let wait = if cfg!(test) {
+                        std::time::Duration::from_millis(10)
+                    } else {
+                        std::time::Duration::from_secs(1)
+                    };
+                    tokio::time::sleep(wait).await;
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -342,7 +347,12 @@ impl AuthManager {
         }
 
         // 6. Wait for code from callback
-        let code = match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+        let timeout_duration = if cfg!(test) {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_secs(300)
+        };
+        let code = match tokio::time::timeout(timeout_duration, rx).await {
             Ok(Ok(c)) => c,
             _ => {
                 server_handle.abort();
@@ -488,5 +498,141 @@ mod tests {
 
         let response = handle_callback(query, State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_auth_manager_get_token_fresh() -> Result<()> {
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "a".into(),
+            token_url: "t".into(),
+            par_url: "p".into(),
+            redirect_url: "r".into(),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::new("svc_test_get_token"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        am.vault.store_token("user", "token")?;
+
+        assert_eq!(am.get_token("user")?, Some("token".into()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_auth_manager_discover_failure() {
+        let config = OidcConfig {
+            discovery_url: Some("http://localhost:1/invalid".into()),
+            client_id: "c".into(),
+            redirect_url: "r".into(),
+            auth_url_override: None,
+            token_url_override: None,
+            par_url_override: None,
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        let res = AuthManager::discover(config, "res".to_string(), "svc", None).await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_auth_manager_manual_token_exchange_failure() -> Result<()> {
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "a".into(),
+            token_url: "http://localhost:1/token".into(),
+            par_url: "p".into(),
+            redirect_url: "r".into(),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::new("svc_test_token_fail"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        let key = crate::crypto::DpopKey::generate();
+        let code = AuthorizationCode::new("code".to_string());
+        let verifier = PkceCodeVerifier::new("verifier".to_string());
+        let res = am
+            .manual_token_exchange("user", &code, &verifier, &key)
+            .await;
+        assert!(res.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_auth_manager_reauthenticate_addr_in_use() -> Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "http://localhost/auth".into(),
+            token_url: "http://localhost/token".into(),
+            par_url: "http://localhost/par".into(),
+            redirect_url: format!("http://127.0.0.1:{}/callback", addr.port()),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::new("svc_test_addr_in_use"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        // This should fail after 5 retries because the port is occupied by 'listener'
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            am.reauthenticate("user", None, None),
+        )
+        .await?;
+        assert!(res.is_err());
+        assert!(res.err().unwrap().to_string().contains("Failed to bind"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_auth_manager_reauthenticate_timeout() -> Result<()> {
+        let par_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let par_addr = par_listener.local_addr()?;
+        let par_url = format!("http://127.0.0.1:{}/par", par_addr.port());
+
+        let cb_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let cb_addr = cb_listener.local_addr()?;
+        drop(cb_listener); // Release port so AuthManager can bind to it
+
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "http://localhost/auth".into(),
+            token_url: "http://localhost/token".into(),
+            par_url: par_url.clone(),
+            redirect_url: format!("http://127.0.0.1:{}/callback", cb_addr.port()),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::new("svc_test_reauth_timeout"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        // Mock PAR response
+        let par_app = Router::new().route(
+            "/par",
+            axum::routing::post(|| async move {
+                axum::Json(serde_json::json!({
+                    "request_uri": "urn:ietf:params:oauth:request_uri:123",
+                    "expires_in": 3600
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(par_listener, par_app).await;
+        });
+
+        std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
+
+        let res = am.reauthenticate("user", None, None).await;
+        assert!(res.is_err());
+        let err_msg = res.err().unwrap().to_string();
+        assert!(err_msg.contains("Authentication timed out"));
+        Ok(())
     }
 }

@@ -456,7 +456,7 @@ async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
     );
 
     let (stdout_tx, _stdout_rx) = mpsc::channel::<String>(10);
-    
+
     let p = proxy.clone();
     let s_url = sse_url.clone();
     tokio::spawn(async move {
@@ -499,7 +499,10 @@ async fn test_discovery_missing_par_endpoint() -> anyhow::Result<()> {
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let discovery_url = format!("http://127.0.0.1:{}/.well-known/openid-configuration", addr.port());
+    let discovery_url = format!(
+        "http://127.0.0.1:{}/.well-known/openid-configuration",
+        addr.port()
+    );
     tokio::spawn(async move {
         let _ = axum::serve(listener, mcp_app).await;
     });
@@ -522,12 +525,13 @@ async fn test_discovery_missing_par_endpoint() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_par_failure_handling() -> anyhow::Result<()> {
-    let mcp_app = Router::new().route(
-        "/par",
-        post(|| async move {
-            (axum::http::StatusCode::BAD_REQUEST, "invalid_request").into_response()
-        }),
-    );
+    let mcp_app =
+        Router::new().route(
+            "/par",
+            post(|| async move {
+                (axum::http::StatusCode::BAD_REQUEST, "invalid_request").into_response()
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let par_url = format!("http://127.0.0.1:{}/par", addr.port());
@@ -535,16 +539,22 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
         let _ = axum::serve(listener, mcp_app).await;
     });
 
-    let am = AuthManager::discover(OidcConfig {
-        discovery_url: None,
-        client_id: "c".into(),
-        redirect_url: "http://127.0.0.1:8081/callback".into(),
-        auth_url_override: Some("a".into()),
-        token_url_override: Some("t".into()),
-        par_url_override: Some(par_url),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-    }, "res".into(), "svc", None).await?;
+    let am = AuthManager::discover(
+        OidcConfig {
+            discovery_url: None,
+            client_id: "c".into(),
+            redirect_url: "http://127.0.0.1:8081/callback".into(),
+            auth_url_override: Some("a".into()),
+            token_url_override: Some("t".into()),
+            par_url_override: Some(par_url),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        },
+        "res".into(),
+        "svc",
+        None,
+    )
+    .await?;
 
     let res = am.reauthenticate("user", None, None).await;
     assert!(res.is_err());
@@ -553,6 +563,7 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_403_step_up_trigger() -> anyhow::Result<()> {
+    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     let test_svc = "mcp-passport-test-403";
     let user = "stepup_user";
     let vault = Vault::new(test_svc);
@@ -560,24 +571,44 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key(user, &dpop_key.to_bytes())?;
 
-    let mcp_app = Router::new().route(
-        "/rpc",
-        post(|headers: HeaderMap| async move {
-            let auth = headers.get("Authorization").and_then(|h| h.to_str().ok());
-            if auth == Some("Bearer valid_but_low_scope") {
-                let challenge = "Bearer error=\"insufficient_scope\", scope=\"admin\", resource_metadata=\"http://localhost/discovery\"";
-                return (
-                    axum::http::StatusCode::FORBIDDEN,
-                    [("WWW-Authenticate", challenge)],
-                    "Forbidden",
-                ).into_response();
-            }
-            axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})).into_response()
-        }),
-    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+    let discovery_url = format!("http://127.0.0.1:{}/discovery", addr.port());
+
+    let durl_clone = discovery_url.clone();
+    let mcp_app = Router::new()
+        .route(
+            "/rpc",
+            post(move |headers: HeaderMap| {
+                let durl = durl_clone.clone();
+                async move {
+                    let auth = headers.get("Authorization").and_then(|h| h.to_str().ok());
+                    if auth == Some("Bearer valid_but_low_scope") {
+                        let challenge = format!("Bearer error=\"insufficient_scope\", scope=\"admin\", resource_metadata=\"{}\"", durl);
+                        return (
+                            axum::http::StatusCode::FORBIDDEN,
+                            [("WWW-Authenticate", challenge)],
+                            "Forbidden",
+                        )
+                            .into_response();
+                    }
+                    axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})).into_response()
+                }
+            }),
+        )
+        .route(
+            "/discovery",
+            get(|| async move {
+                axum::Json(json!({
+                    "issuer": "http://localhost",
+                    "authorization_endpoint": "http://localhost/auth",
+                    "token_endpoint": "http://localhost/token",
+                    "pushed_authorization_request_endpoint": "http://localhost/par"
+                }))
+            }),
+        );
+
     tokio::spawn(async move {
         let _ = axum::serve(listener, mcp_app).await;
     });
@@ -602,10 +633,12 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
         AuthScheme::Bearer,
     );
 
+    // This should trigger 403, then discovery, then PAR, then wait for callback.
     let res = timeout(
         Duration::from_secs(2),
         proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
-    ).await?;
+    )
+    .await?;
 
     assert!(res.is_err());
     Ok(())
@@ -621,9 +654,7 @@ async fn test_sse_non_401_error() -> anyhow::Result<()> {
 
     let mcp_app = Router::new().route(
         "/sse",
-        get(|| async move {
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error")
-        }),
+        get(|| async move { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Error") }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
@@ -671,7 +702,14 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
     let mcp_app = Router::new().route(
         "/rpc",
         post(|| async move {
-            (axum::http::StatusCode::UNAUTHORIZED, [("WWW-Authenticate", "Bearer resource_metadata=\"http://localhost:1/disc\"")], "Unauthorized")
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [(
+                    "WWW-Authenticate",
+                    "Bearer resource_metadata=\"http://localhost:1/disc\"",
+                )],
+                "Unauthorized",
+            )
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -701,16 +739,199 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
 
     let p1 = p.clone();
     let task1 = tokio::spawn(async move {
-        let _ = p1.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})).await;
+        let _ = p1
+            .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+            .await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
+
     vault.store_token(user, "new_token")?;
-    let res = p.handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"})).await;
-    
+    let res = p
+        .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        .await;
+
     assert!(res.is_err() || res.is_ok());
 
     let _ = task1.await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
+    let test_svc = "mcp-passport-test-nocontent";
+    let user = "nocontent_user";
+    let vault = Vault::new(test_svc);
+    vault.store_token(user, "valid_token")?;
+    vault.store_dpop_key(user, &DpopKey::generate().to_bytes())?;
+
+    let mcp_app = Router::new().route(
+        "/rpc",
+        post(|headers: HeaderMap| async move {
+            let sid = headers.get("mcp-session-id");
+            let mut res_headers = HeaderMap::new();
+            if sid.is_none() {
+                res_headers.insert("mcp-session-id", "session-123".parse().unwrap());
+            }
+
+            (axum::http::StatusCode::NO_CONTENT, res_headers, "").into_response()
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let proxy = Proxy::new(
+        &rpc_url,
+        user,
+        OidcConfig {
+            discovery_url: None,
+            client_id: "c".into(),
+            redirect_url: "r".into(),
+            auth_url_override: None,
+            token_url_override: None,
+            par_url_override: None,
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        },
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    );
+
+    // First request should capture session ID and return Null (for NO_CONTENT)
+    let res1 = proxy
+        .clone()
+        .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+        .await?;
+    assert_eq!(res1, serde_json::Value::Null);
+
+    // Second request should include the session ID
+    // We can't easily verify the header here without changing the mock, but we can check if it finishes.
+    let res2 = proxy
+        .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        .await?;
+    assert_eq!(res2, serde_json::Value::Null);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
+    let test_svc = "mcp-passport-test-timeout";
+    let user = "timeout_user";
+    let vault = Vault::new(test_svc);
+    let _ = vault.delete_token(user);
+
+    let mcp_app = Router::new().route(
+        "/rpc",
+        post(|| async move {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [(
+                    "WWW-Authenticate",
+                    "Bearer resource_metadata=\"http://localhost:1/discovery\"",
+                )],
+                "Unauthorized",
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    let oidc_config = OidcConfig {
+        discovery_url: None,
+        client_id: "c".into(),
+        redirect_url: "http://127.0.0.1:8081/callback".into(),
+        auth_url_override: Some("a".into()),
+        token_url_override: Some("t".into()),
+        par_url_override: Some("p".into()),
+        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let proxy = Proxy::new(
+        &rpc_url,
+        user,
+        oidc_config,
+        test_svc,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    );
+
+    // This should time out because "a", "t", "p" are invalid URLs or won't respond
+    let res = timeout(
+        Duration::from_secs(5),
+        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+    )
+    .await?;
+
+    assert!(res.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_lib_run_minimal() -> anyhow::Result<()> {
+    use clap::Parser;
+    use mcp_passport::config::Config;
+    use tokio::io::AsyncWriteExt;
+
+    let test_svc = "mcp-passport-test-run";
+    let _ = Vault::new(test_svc).delete_token("run_user");
+
+    let mcp_app = Router::new().route(
+        "/rpc",
+        post(|| async move { axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mcp_app).await;
+    });
+
+    // Pre-populate vault to skip OIDC
+    let vault = Vault::new("mcp-passport"); // default service in run()
+    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+    vault.store_token("run_user", "valid")?;
+    vault.store_dpop_key("run_user", &DpopKey::generate().to_bytes())?;
+
+    let config = Config::try_parse_from(vec![
+        "mcp-passport",
+        "--remote-mcp-url",
+        &rpc_url,
+        "--remote-sse-url",
+        &format!("http://127.0.0.1:{}/sse", addr.port()),
+        "--user-id",
+        "run_user",
+        "--oidc-client-id",
+        "c",
+        "--oidc-redirect-url",
+        "http://localhost:8081/callback",
+    ])?;
+
+    let (_client_out_rx, server_out_tx) = tokio::io::duplex(1024);
+    let (mut client_in_tx, server_in_rx) = tokio::io::duplex(1024);
+
+    let run_handle =
+        tokio::spawn(async move { mcp_passport::run(config, server_in_rx, server_out_tx).await });
+
+    client_in_tx
+        .write_all(b"{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"test\"}\n")
+        .await?;
+    drop(client_in_tx); // Close stdin to trigger shutdown
+
+    let res = timeout(Duration::from_secs(5), run_handle).await??;
+    assert!(res.is_ok());
+
     Ok(())
 }
