@@ -897,7 +897,8 @@ mod tests {
 
         // Initially not suspended
         let p = proxy.clone();
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), p.wait_for_airlock()).await?;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), p.wait_for_airlock())
+            .await?;
 
         // Manually activate airlock
         let _ = proxy.suspension_tx.send(true);
@@ -905,7 +906,6 @@ mod tests {
         let handle = tokio::spawn(async move {
             let _ = p2.wait_for_airlock().await;
         });
-
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let _ = proxy.suspension_tx.send(false);
@@ -1034,7 +1034,11 @@ mod tests {
             AuthScheme::Bearer,
         );
         // It will retry infinitely, so we just want to see it starting and failing once.
-        let res = tokio::time::timeout(std::time::Duration::from_millis(100), proxy.listen_sse("http://localhost:1/sse", tx)).await;
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            proxy.listen_sse("http://localhost:1/sse", tx),
+        )
+        .await;
         assert!(res.is_err()); // Timeout means it's still retrying
         Ok(())
     }
