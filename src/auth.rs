@@ -49,6 +49,8 @@ pub struct OidcConfig {
     pub internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
     /// Internal channel to communicate the callback server address (used for automation/tests).
     pub internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
+    /// Directory containing custom templates for success/failure pages.
+    pub template_dir: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for OidcConfig {
@@ -57,6 +59,7 @@ impl std::fmt::Debug for OidcConfig {
             .field("discovery_url", &self.discovery_url)
             .field("client_id", &self.client_id)
             .field("redirect_url", &self.redirect_url)
+            .field("template_dir", &self.template_dir)
             .finish()
     }
 }
@@ -84,13 +87,27 @@ pub struct AuthManager {
     internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
     /// Internal channel to communicate the callback server address.
     internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
+    /// Directory containing custom templates for success/failure pages.
+    template_dir: Option<std::path::PathBuf>,
+    /// Human-friendly name of the identity provider.
+    issuer_name: String,
+    /// Human-friendly name of the protected resource.
+    resource_name: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct DiscoveryDocument {
+    issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
     pushed_authorization_request_endpoint: Option<String>,
+    #[serde(rename = "organization_name")]
+    organization_name: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResourceMetadata {
+    resource_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,7 +137,7 @@ impl AuthManager {
             .map(|s| s.to_string())
             .or_else(|| oidc_config.discovery_url.clone());
 
-        let (auth_url, token_url, par_url) = if let Some(url) = discovery_url {
+        let (auth_url, token_url, par_url, issuer_name) = if let Some(url) = discovery_url {
             info!("Fetching OIDC discovery from {}...", url);
             let resp = http_client.get(url.clone()).send().await?;
             if !resp.status().is_success() {
@@ -143,7 +160,8 @@ impl AuthManager {
             let par = oidc_config.par_url_override.clone().or(doc.pushed_authorization_request_endpoint)
                 .context("Discovery document missing pushed_authorization_request_endpoint and no override provided")?;
 
-            (auth, token, par)
+            let name = doc.organization_name.unwrap_or(doc.issuer);
+            (auth, token, par, name)
         } else {
             let auth = oidc_config
                 .auth_url_override
@@ -157,7 +175,27 @@ impl AuthManager {
                 .par_url_override
                 .clone()
                 .context("par_url is required when discovery_url is missing")?;
-            (auth, token, par)
+            (auth, token, par, "Custom Provider".to_string())
+        };
+
+        // Fetch Protected Resource Metadata (RFC 9728)
+        let resource_name = if let Ok(mut res_url) = url::Url::parse(&resource) {
+            res_url.set_path("/.well-known/oauth-protected-resource");
+            res_url.set_query(None);
+            res_url.set_fragment(None);
+
+            info!("Fetching Protected Resource Metadata from {}...", res_url);
+            match http_client.get(res_url.as_str()).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<ResourceMetadata>().await {
+                        Ok(meta) => meta.resource_name.unwrap_or_else(|| resource.clone()),
+                        Err(_) => resource.clone(),
+                    }
+                }
+                _ => resource.clone(),
+            }
+        } else {
+            resource.clone()
         };
 
         Ok(Self {
@@ -171,6 +209,9 @@ impl AuthManager {
             vault: Vault::new(service),
             internal_url_tx: oidc_config.internal_url_tx,
             internal_callback_tx: oidc_config.internal_callback_tx,
+            template_dir: oidc_config.template_dir,
+            issuer_name,
+            resource_name,
         })
     }
 
@@ -212,7 +253,13 @@ impl AuthManager {
 
         let app = Router::new()
             .route("/callback", get(handle_callback))
-            .with_state(AuthServerState { expected_state, tx });
+            .with_state(AuthServerState {
+                expected_state,
+                tx,
+                template_dir: self.template_dir.clone(),
+                issuer_name: self.issuer_name.clone(),
+                resource_name: self.resource_name.clone(),
+            });
 
         let addr: SocketAddr = self
             .redirect_url
@@ -425,6 +472,9 @@ impl AuthManager {
 struct AuthServerState {
     expected_state: String,
     tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    template_dir: Option<std::path::PathBuf>,
+    issuer_name: String,
+    resource_name: String,
 }
 
 async fn handle_callback(
@@ -432,22 +482,44 @@ async fn handle_callback(
     State(state): State<AuthServerState>,
 ) -> impl IntoResponse {
     if query.state != state.expected_state {
-        return (axum::http::StatusCode::BAD_REQUEST, "Invalid state").into_response();
+        let mut html = if let Some(dir) = &state.template_dir {
+            std::fs::read_to_string(dir.join("failure.html"))
+                .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
+        } else {
+            crate::templates::DEFAULT_FAILURE_HTML.to_string()
+        };
+        html = html.replace("{{ERROR_MESSAGE}}", "Invalid state");
+        html = html.replace("{{ISSUER_NAME}}", &state.issuer_name);
+        html = html.replace("{{RESOURCE_NAME}}", &state.resource_name);
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::response::Html(html),
+        )
+            .into_response();
     }
     let mut lock = state.tx.lock().await;
     if let Some(s) = lock.take() {
         let _ = s.send(query.code.clone());
-        (
-            axum::http::StatusCode::OK,
-            "Authentication successful! You can close this tab and return to the terminal.",
-        )
-            .into_response()
+        let mut html = if let Some(dir) = &state.template_dir {
+            std::fs::read_to_string(dir.join("success.html"))
+                .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string())
+        } else {
+            crate::templates::DEFAULT_SUCCESS_HTML.to_string()
+        };
+        html = html.replace("{{ISSUER_NAME}}", &state.issuer_name);
+        html = html.replace("{{RESOURCE_NAME}}", &state.resource_name);
+        (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
     } else {
-        (
-            axum::http::StatusCode::GONE,
-            "Already authenticated or timed out.",
-        )
-            .into_response()
+        let mut html = if let Some(dir) = &state.template_dir {
+            std::fs::read_to_string(dir.join("failure.html"))
+                .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
+        } else {
+            crate::templates::DEFAULT_FAILURE_HTML.to_string()
+        };
+        html = html.replace("{{ERROR_MESSAGE}}", "Already authenticated or timed out.");
+        html = html.replace("{{ISSUER_NAME}}", &state.issuer_name);
+        html = html.replace("{{RESOURCE_NAME}}", &state.resource_name);
+        (axum::http::StatusCode::GONE, axum::response::Html(html)).into_response()
     }
 }
 
@@ -461,6 +533,9 @@ mod tests {
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+            template_dir: None,
+            issuer_name: "Test Issuer".to_string(),
+            resource_name: "Test Resource".to_string(),
         };
 
         let query = Query(AuthCallback {
@@ -479,6 +554,9 @@ mod tests {
         let state = AuthServerState {
             expected_state: "expected".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+            template_dir: None,
+            issuer_name: "Test Issuer".to_string(),
+            resource_name: "Test Resource".to_string(),
         };
 
         let query = Query(AuthCallback {
