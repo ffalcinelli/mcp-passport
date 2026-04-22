@@ -184,7 +184,9 @@ mod tests {
         let signature = p256::ecdsa::Signature::from_slice(&sig_bytes)?;
 
         let verifying_key = VerifyingKey::from(&key.signing_key);
-        verifying_key.verify(message.as_bytes(), &signature).expect("Signature verification failed");
+        verifying_key
+            .verify(message.as_bytes(), &signature)
+            .expect("Signature verification failed");
 
         let claims_json: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
         assert_eq!(claims_json["htm"], htm);
