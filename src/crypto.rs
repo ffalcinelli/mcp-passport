@@ -169,6 +169,31 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_proof_signature() -> Result<()> {
+        use p256::ecdsa::signature::Verifier;
+
+        let key = DpopKey::generate();
+        let htm = "POST";
+        let htu = "https://api.example.com/rpc";
+        let proof = key.generate_proof(htm, htu)?;
+        let parts: Vec<&str> = proof.split('.').collect();
+        assert_eq!(parts.len(), 3);
+
+        let message = format!("{}.{}", parts[0], parts[1]);
+        let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2])?;
+        let signature = p256::ecdsa::Signature::from_slice(&sig_bytes)?;
+
+        let verifying_key = VerifyingKey::from(&key.signing_key);
+        verifying_key.verify(message.as_bytes(), &signature).expect("Signature verification failed");
+
+        let claims_json: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
+        assert_eq!(claims_json["htm"], htm);
+        assert_eq!(claims_json["htu"], htu);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_generate_proof_with_ath() -> Result<()> {
         let key = DpopKey::generate();
         let access_token = "test_token";
