@@ -99,6 +99,13 @@ fn extract_param(header: &str, param: &str) -> Option<String> {
     None
 }
 
+fn derive_resource_url(remote_url: &str) -> Result<String> {
+    let u = Url::parse(remote_url).context("Failed to parse remote URL")?;
+    let joined = u.join("/.well-known/oauth-protected-resource")
+        .context("Failed to join URL with well-known path")?;
+    Ok(joined.to_string())
+}
+
 impl Proxy {
     /// Creates a new Proxy instance.
     pub fn new(
@@ -244,11 +251,7 @@ impl Proxy {
                 let metadata_url = challenge.resource_metadata.or_else(|| {
                     // Fallback to well-known at root if header is missing
                     info!("WWW-Authenticate missing resource_metadata, falling back to root well-known...");
-                    Url::parse(&self.remote_url).ok().and_then(|u| {
-                        u.join("/.well-known/oauth-protected-resource")
-                            .ok()
-                            .map(|url| url.to_string())
-                    })
+                    derive_resource_url(&self.remote_url).ok()
                 });
 
                 self.trigger_reauth(
@@ -269,11 +272,7 @@ impl Proxy {
                     warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
 
                     let metadata_url = challenge.resource_metadata.or_else(|| {
-                        Url::parse(&self.remote_url).ok().and_then(|u| {
-                            u.join("/.well-known/oauth-protected-resource")
-                                .ok()
-                                .map(|url| url.to_string())
-                        })
+                        derive_resource_url(&self.remote_url).ok()
                     });
 
                     self.trigger_reauth(
@@ -546,11 +545,7 @@ impl Proxy {
 
                             let challenge = WwwAuthenticate::parse(resp.headers());
                             let metadata_url = challenge.resource_metadata.or_else(|| {
-                                Url::parse(&self.remote_url).ok().and_then(|u| {
-                                    u.join("/.well-known/oauth-protected-resource")
-                                        .ok()
-                                        .map(|url| url.to_string())
-                                })
+                                derive_resource_url(&self.remote_url).ok()
                             });
 
                             if let Err(e) = self
@@ -684,22 +679,21 @@ mod tests {
     }
 
     #[test]
-    fn test_url_joining_behavior() {
+    fn test_url_joining_behavior() -> Result<()> {
         let remote_url = "http://localhost:8081/rpc";
-        let u = Url::parse(remote_url).unwrap();
-        let joined = u.join("/.well-known/oauth-protected-resource").unwrap();
+        let joined = derive_resource_url(remote_url)?;
         assert_eq!(
-            joined.as_str(),
+            joined,
             "http://localhost:8081/.well-known/oauth-protected-resource"
         );
 
         let remote_url_no_path = "http://localhost:8081";
-        let u = Url::parse(remote_url_no_path).unwrap();
-        let joined = u.join("/.well-known/oauth-protected-resource").unwrap();
+        let joined = derive_resource_url(remote_url_no_path)?;
         assert_eq!(
-            joined.as_str(),
+            joined,
             "http://localhost:8081/.well-known/oauth-protected-resource"
         );
+        Ok(())
     }
 
     #[test]
