@@ -715,6 +715,12 @@ mod tests {
         assert_eq!(extract_param(val, "scope"), Some("a".to_string())); // Stops at first comma
     }
 
+    #[test]
+    fn test_extract_param_unquoted_at_end() {
+        let val = "Bearer foo=bar";
+        assert_eq!(extract_param(val, "foo"), Some("bar".to_string()));
+    }
+
     #[tokio::test]
     async fn test_proxy_ensure_auth_manager_no_discovery() {
         let proxy = Proxy::new(
