@@ -101,7 +101,8 @@ fn extract_param(header: &str, param: &str) -> Option<String> {
 
 fn derive_resource_url(remote_url: &str) -> Result<String> {
     let u = Url::parse(remote_url).context("Failed to parse remote URL")?;
-    let joined = u.join("/.well-known/oauth-protected-resource")
+    let joined = u
+        .join("/.well-known/oauth-protected-resource")
         .context("Failed to join URL with well-known path")?;
     Ok(joined.to_string())
 }
@@ -271,9 +272,9 @@ impl Proxy {
                 if challenge.error.as_deref() == Some("insufficient_scope") {
                     warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
 
-                    let metadata_url = challenge.resource_metadata.or_else(|| {
-                        derive_resource_url(&self.remote_url).ok()
-                    });
+                    let metadata_url = challenge
+                        .resource_metadata
+                        .or_else(|| derive_resource_url(&self.remote_url).ok());
 
                     self.trigger_reauth(
                         token_opt.as_deref(),
@@ -544,9 +545,9 @@ impl Proxy {
                             source.close();
 
                             let challenge = WwwAuthenticate::parse(resp.headers());
-                            let metadata_url = challenge.resource_metadata.or_else(|| {
-                                derive_resource_url(&self.remote_url).ok()
-                            });
+                            let metadata_url = challenge
+                                .resource_metadata
+                                .or_else(|| derive_resource_url(&self.remote_url).ok());
 
                             if let Err(e) = self
                                 .trigger_reauth(
