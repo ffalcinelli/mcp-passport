@@ -493,7 +493,8 @@ async fn handle_callback(
 ) -> impl IntoResponse {
     if query.state != state.expected_state {
         let mut html = if let Some(dir) = &state.template_dir {
-            std::fs::read_to_string(dir.join("failure.html"))
+            tokio::fs::read_to_string(dir.join("failure.html"))
+                .await
                 .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
         } else {
             crate::templates::DEFAULT_FAILURE_HTML.to_string()
@@ -511,7 +512,8 @@ async fn handle_callback(
     if let Some(s) = lock.take() {
         let _ = s.send(query.code.clone());
         let mut html = if let Some(dir) = &state.template_dir {
-            std::fs::read_to_string(dir.join("success.html"))
+            tokio::fs::read_to_string(dir.join("success.html"))
+                .await
                 .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string())
         } else {
             crate::templates::DEFAULT_SUCCESS_HTML.to_string()
@@ -521,7 +523,8 @@ async fn handle_callback(
         (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
     } else {
         let mut html = if let Some(dir) = &state.template_dir {
-            std::fs::read_to_string(dir.join("failure.html"))
+            tokio::fs::read_to_string(dir.join("failure.html"))
+                .await
                 .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
         } else {
             crate::templates::DEFAULT_FAILURE_HTML.to_string()
@@ -556,6 +559,69 @@ mod tests {
         let response = handle_callback(query, State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert_eq!(rx.try_recv().unwrap(), "test_code");
+    }
+
+    #[tokio::test]
+    async fn test_handle_callback_with_templates() -> Result<()> {
+        let temp_dir = std::env::temp_dir().join(format!("mcp_test_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir).await?;
+        tokio::fs::write(temp_dir.join("success.html"), "SUCCESS {{RESOURCE_NAME}}").await?;
+        tokio::fs::write(temp_dir.join("failure.html"), "FAILURE {{ERROR_MESSAGE}}").await?;
+
+        let (tx, mut rx) = oneshot::channel::<String>();
+        let state = AuthServerState {
+            expected_state: "test_state".to_string(),
+            tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+            template_dir: Some(temp_dir.clone()),
+            issuer_name: "Test Issuer".to_string(),
+            resource_name: "Test Resource".to_string(),
+        };
+
+        // 1. Success case
+        let query_ok = Query(AuthCallback {
+            code: "test_code".to_string(),
+            state: "test_state".to_string(),
+        });
+        let res_ok = handle_callback(query_ok, State(state.clone()))
+            .await
+            .into_response();
+        assert_eq!(res_ok.status(), axum::http::StatusCode::OK);
+        let body_ok = axum::body::to_bytes(res_ok.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body_ok).contains("SUCCESS Test Resource"));
+        assert_eq!(rx.try_recv().unwrap(), "test_code");
+
+        // 2. Invalid state case
+        let query_err = Query(AuthCallback {
+            code: "c".to_string(),
+            state: "wrong".to_string(),
+        });
+        let res_err = handle_callback(query_err, State(state.clone()))
+            .await
+            .into_response();
+        assert_eq!(res_err.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body_err = axum::body::to_bytes(res_err.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body_err).contains("FAILURE Invalid state"));
+
+        // 3. Already authenticated case (tx taken)
+        let query_gone = Query(AuthCallback {
+            code: "c".to_string(),
+            state: "test_state".to_string(),
+        });
+        let res_gone = handle_callback(query_gone, State(state.clone()))
+            .await
+            .into_response();
+        assert_eq!(res_gone.status(), axum::http::StatusCode::GONE);
+        let body_gone = axum::body::to_bytes(res_gone.into_body(), 1024)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body_gone).contains("FAILURE Already authenticated"));
+
+        tokio::fs::remove_dir_all(temp_dir).await?;
+        Ok(())
     }
 
     #[tokio::test]
