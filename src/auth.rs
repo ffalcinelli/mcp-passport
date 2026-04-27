@@ -579,6 +579,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_auth_manager_set_internal_url_tx() {
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "a".into(),
+            token_url: "t".into(),
+            par_url: "p".into(),
+            redirect_url: "r".into(),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::new("svc_test_set_internal_url_tx"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            issuer_name: "Mock Issuer".into(),
+            resource_name: "Mock Resource".into(),
+            template_dir: None,
+        };
+
+        let (tx, _rx) = oneshot::channel::<String>();
+        am.set_internal_url_tx(tx).await;
+
+        let lock = am.internal_url_tx.lock().await;
+        assert!(lock.is_some());
+    }
+
+    #[tokio::test]
     async fn test_auth_manager_get_token_fresh() -> Result<()> {
         let am = AuthManager {
             client_id: "c".into(),
