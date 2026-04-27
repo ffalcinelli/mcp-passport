@@ -493,7 +493,8 @@ async fn handle_callback(
 ) -> impl IntoResponse {
     if query.state != state.expected_state {
         let mut html = if let Some(dir) = &state.template_dir {
-            std::fs::read_to_string(dir.join("failure.html"))
+            tokio::fs::read_to_string(dir.join("failure.html"))
+                .await
                 .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
         } else {
             crate::templates::DEFAULT_FAILURE_HTML.to_string()
@@ -511,7 +512,8 @@ async fn handle_callback(
     if let Some(s) = lock.take() {
         let _ = s.send(query.code.clone());
         let mut html = if let Some(dir) = &state.template_dir {
-            std::fs::read_to_string(dir.join("success.html"))
+            tokio::fs::read_to_string(dir.join("success.html"))
+                .await
                 .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string())
         } else {
             crate::templates::DEFAULT_SUCCESS_HTML.to_string()
@@ -521,7 +523,8 @@ async fn handle_callback(
         (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
     } else {
         let mut html = if let Some(dir) = &state.template_dir {
-            std::fs::read_to_string(dir.join("failure.html"))
+            tokio::fs::read_to_string(dir.join("failure.html"))
+                .await
                 .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
         } else {
             crate::templates::DEFAULT_FAILURE_HTML.to_string()
