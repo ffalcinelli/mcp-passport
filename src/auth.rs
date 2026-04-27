@@ -586,7 +586,9 @@ mod tests {
             .await
             .into_response();
         assert_eq!(res_ok.status(), axum::http::StatusCode::OK);
-        let body_ok = axum::body::to_bytes(res_ok.into_body(), 1024).await.unwrap();
+        let body_ok = axum::body::to_bytes(res_ok.into_body(), 1024)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&body_ok).contains("SUCCESS Test Resource"));
         assert_eq!(rx.try_recv().unwrap(), "test_code");
 
@@ -599,7 +601,9 @@ mod tests {
             .await
             .into_response();
         assert_eq!(res_err.status(), axum::http::StatusCode::BAD_REQUEST);
-        let body_err = axum::body::to_bytes(res_err.into_body(), 1024).await.unwrap();
+        let body_err = axum::body::to_bytes(res_err.into_body(), 1024)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&body_err).contains("FAILURE Invalid state"));
 
         // 3. Already authenticated case (tx taken)
@@ -611,7 +615,9 @@ mod tests {
             .await
             .into_response();
         assert_eq!(res_gone.status(), axum::http::StatusCode::GONE);
-        let body_gone = axum::body::to_bytes(res_gone.into_body(), 1024).await.unwrap();
+        let body_gone = axum::body::to_bytes(res_gone.into_body(), 1024)
+            .await
+            .unwrap();
         assert!(String::from_utf8_lossy(&body_gone).contains("FAILURE Already authenticated"));
 
         tokio::fs::remove_dir_all(temp_dir).await?;
