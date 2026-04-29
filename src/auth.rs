@@ -133,8 +133,7 @@ impl AuthManager {
     ) -> Result<Self> {
         let http_client = HttpClient::new();
 
-        let discovery_url = metadata_url_override
-            .or(oidc_config.discovery_url.as_deref());
+        let discovery_url = metadata_url_override.or(oidc_config.discovery_url.as_deref());
 
         let (auth_url, token_url, par_url, issuer_name) = if let Some(url) = discovery_url {
             info!("Fetching OIDC discovery from {}...", url);

@@ -150,8 +150,7 @@ impl Proxy {
             return Ok(Arc::new(am.clone()));
         }
 
-        let discovery_url = metadata_url
-            .or(self.oidc_config.discovery_url.as_deref());
+        let discovery_url = metadata_url.or(self.oidc_config.discovery_url.as_deref());
 
         info!(
             "Performing dynamic discovery for AuthManager (url: {:?})...",
