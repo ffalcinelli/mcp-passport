@@ -151,8 +151,7 @@ impl Proxy {
         }
 
         let discovery_url = metadata_url
-            .map(|s| s.to_string())
-            .or_else(|| self.oidc_config.discovery_url.clone());
+            .or(self.oidc_config.discovery_url.as_deref());
 
         info!(
             "Performing dynamic discovery for AuthManager (url: {:?})...",

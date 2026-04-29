@@ -134,12 +134,11 @@ impl AuthManager {
         let http_client = HttpClient::new();
 
         let discovery_url = metadata_url_override
-            .map(|s| s.to_string())
-            .or_else(|| oidc_config.discovery_url.clone());
+            .or(oidc_config.discovery_url.as_deref());
 
         let (auth_url, token_url, par_url, issuer_name) = if let Some(url) = discovery_url {
             info!("Fetching OIDC discovery from {}...", url);
-            let resp = http_client.get(url.clone()).send().await?;
+            let resp = http_client.get(url).send().await?;
             if !resp.status().is_success() {
                 anyhow::bail!(
                     "Failed to fetch discovery document from {}: {}",
