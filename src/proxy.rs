@@ -176,6 +176,10 @@ impl Proxy {
         let mut retry_count = 0;
         let max_retries = 2;
 
+        let mut last_reauth_count: Option<u64> = None;
+        let mut token_opt = None;
+        let mut dpop_key_opt: Option<DpopKey> = None;
+
         loop {
             if retry_count > max_retries {
                 error!("Maximum retry attempts reached for request. Aborting to prevent infinite loop.");
@@ -183,12 +187,20 @@ impl Proxy {
             }
 
             self.wait_for_airlock().await?;
+            let current_reauth_count = { *self.reauth_count.read().await };
 
-            let token_opt = self.vault.get_token(&self.user_id)?;
+            if last_reauth_count != Some(current_reauth_count) {
+                token_opt = self.vault.get_token(&self.user_id)?;
+                dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
+                    Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
+                    None => None,
+                };
+                last_reauth_count = Some(current_reauth_count);
+            }
 
             let response = if let Some(ref token) = token_opt {
-                let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
-                    Some(bytes) => DpopKey::from_bytes(&bytes)?,
+                let dpop_key = match dpop_key_opt {
+                    Some(ref key) => key,
                     None => {
                         info!("No DPoP key found for user, triggering re-authentication...");
                         self.trigger_reauth(None, None, None).await?;
@@ -483,15 +495,28 @@ impl Proxy {
         use futures::StreamExt;
         use reqwest_eventsource::EventSource;
 
+        let mut last_reauth_count: Option<u64> = None;
+        let mut token_opt = None;
+        let mut dpop_key_opt: Option<DpopKey> = None;
+
         loop {
             self.wait_for_airlock().await?;
+            let current_reauth_count = { *self.reauth_count.read().await };
 
-            let token_opt = self.vault.get_token(&self.user_id)?;
+            if last_reauth_count != Some(current_reauth_count) {
+                token_opt = self.vault.get_token(&self.user_id)?;
+                dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
+                    Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
+                    None => None,
+                };
+                last_reauth_count = Some(current_reauth_count);
+            }
+
             let token_for_trigger = token_opt.clone();
 
             let mut request = if let Some(token) = token_opt.as_ref() {
-                let dpop_key = match self.vault.get_dpop_key(&self.user_id)? {
-                    Some(bytes) => DpopKey::from_bytes(&bytes)?,
+                let dpop_key = match dpop_key_opt {
+                    Some(ref key) => key,
                     None => {
                         info!("No DPoP key found for user in SSE listener, triggering re-authentication...");
                         self.trigger_reauth(None, None, None).await?;
