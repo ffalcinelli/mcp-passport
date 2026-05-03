@@ -766,30 +766,89 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_handle_request_max_retries() -> Result<()> {
+        use axum::routing::post;
+        use axum::Router;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let mcp_app = Router::new().route(
+            "/rpc",
+            post(move || {
+                let c = counter_clone.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        [(
+                            "WWW-Authenticate",
+                            "Bearer realm=\"mcp\", resource_metadata=\"http://localhost/discovery\"",
+                        )],
+                        "Unauthorized",
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mcp_app).await;
+        });
+
         let proxy = Proxy::new(
-            "http://localhost:1/rpc",
-            "user",
+            &rpc_url,
+            "user_retry",
             OidcConfig {
                 discovery_url: None,
                 client_id: "c".into(),
-                redirect_url: "r".into(),
-                auth_url_override: Some("http://localhost:1/auth".into()),
-                token_url_override: Some("http://localhost:1/token".into()),
-                par_url_override: Some("http://localhost:1/par".into()),
+                redirect_url: "http://127.0.0.1:8080/callback".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
                 internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            "svc_retry",
             "v1",
             AuthScheme::Bearer,
         );
 
-        // This should fail immediately because URL is invalid and it will retry but fail.
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::new("svc_retry");
+
+        // Background task to keep updating the token so trigger_reauth returns Ok(()) (redundant check)
+        let vault_clone = vault.clone();
+        let stop_updating = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_updating_clone = stop_updating.clone();
+        tokio::spawn(async move {
+            let mut i = 0;
+            while !stop_updating_clone.load(Ordering::SeqCst) {
+                let _ = vault_clone.store_token("user_retry", &format!("token-{}", i));
+                let _ = vault_clone
+                    .store_dpop_key("user_retry", &crate::crypto::DpopKey::generate().to_bytes());
+                i += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                if i > 1000 {
+                    break;
+                } // Safety break
+            }
+        });
+
         let res = proxy
             .handle_request(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
             .await;
+        stop_updating.store(true, Ordering::SeqCst);
+
         assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Maximum retry attempts reached"));
+
+        // Initial (retry_count=0) + Retry 1 (retry_count=1) + Retry 2 (retry_count=2) = 3 attempts
+        // When retry_count becomes 3, it bails before the 4th attempt.
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+
         Ok(())
     }
 
