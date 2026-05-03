@@ -801,10 +801,8 @@ mod tests {
             let mut i = 0;
             while !stop_updating_clone.load(Ordering::SeqCst) {
                 let _ = vault_clone.store_token("user_retry", &format!("token-{}", i));
-                let _ = vault_clone.store_dpop_key(
-                    "user_retry",
-                    &crate::crypto::DpopKey::generate().to_bytes(),
-                );
+                let _ = vault_clone
+                    .store_dpop_key("user_retry", &crate::crypto::DpopKey::generate().to_bytes());
                 i += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 if i > 1000 {
