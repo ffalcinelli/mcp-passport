@@ -224,13 +224,11 @@ impl Proxy {
                     .header("DPoP", dpop_proof)
                     .header("MCP-Protocol-Version", &self.protocol_version);
 
-                let sid = {
+                {
                     let sid_lock = self.session_id.lock().await;
-                    sid_lock.clone()
-                };
-
-                if let Some(s) = sid {
-                    request = request.header("MCP-Session-Id", s);
+                    if let Some(s) = &*sid_lock {
+                        request = request.header("MCP-Session-Id", s);
+                    }
                 }
 
                 request.json(&payload).send().await?
@@ -244,12 +242,11 @@ impl Proxy {
                     .post(&self.remote_url)
                     .header("MCP-Protocol-Version", &self.protocol_version);
 
-                let sid = {
+                {
                     let sid_lock = self.session_id.lock().await;
-                    sid_lock.clone()
-                };
-                if let Some(s) = sid {
-                    request = request.header("MCP-Session-Id", s);
+                    if let Some(s) = &*sid_lock {
+                        request = request.header("MCP-Session-Id", s);
+                    }
                 }
 
                 request.json(&payload).send().await?
@@ -543,13 +540,11 @@ impl Proxy {
                     .header("MCP-Protocol-Version", &self.protocol_version)
             };
 
-            let sid = {
+            {
                 let sid_lock = self.session_id.lock().await;
-                sid_lock.clone()
-            };
-
-            if let Some(s) = sid {
-                request = request.header("MCP-Session-Id", s);
+                if let Some(s) = &*sid_lock {
+                    request = request.header("MCP-Session-Id", s);
+                }
             }
 
             info!("Opening SSE connection to {}...", sse_url);
