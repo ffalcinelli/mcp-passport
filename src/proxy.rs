@@ -191,10 +191,14 @@ impl Proxy {
 
             if last_reauth_count != Some(current_reauth_count) {
                 token_opt = self.vault.get_token(&self.user_id)?;
-                dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
-                    Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
-                    None => None,
-                };
+                if token_opt.is_some() {
+                    dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
+                        Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
+                        None => None,
+                    };
+                } else {
+                    dpop_key_opt = None;
+                }
                 last_reauth_count = Some(current_reauth_count);
             }
 
@@ -502,10 +506,14 @@ impl Proxy {
 
             if last_reauth_count != Some(current_reauth_count) {
                 token_opt = self.vault.get_token(&self.user_id)?;
-                dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
-                    Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
-                    None => None,
-                };
+                if token_opt.is_some() {
+                    dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
+                        Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
+                        None => None,
+                    };
+                } else {
+                    dpop_key_opt = None;
+                }
                 last_reauth_count = Some(current_reauth_count);
             }
 
