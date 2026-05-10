@@ -209,6 +209,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_process_message_with_id() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let mcp_app = Router::new().route(
+            "/rpc",
+            post(|| async move { axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let rpc_url = format!("http://127.0.0.1:{}/rpc", addr.port());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mcp_app).await;
+        });
+
+        let proxy = Proxy::new(
+            &rpc_url,
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "test_process_message_svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        // Pre-populate vault to skip OIDC
+        let vault = Vault::new("test_process_message_svc");
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        vault.store_token("user", "valid")?;
+        vault.store_dpop_key("user", &crate::crypto::DpopKey::generate().to_bytes())?;
+
+        // A message with an ID should produce a response to stdout_tx
+        process_message(
+            proxy,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "test"}).to_string(),
+            tx,
+        )
+        .await;
+
+        let resp = rx.recv().await.expect("Expected a response");
+        assert!(resp.contains("\"result\":\"ok\""));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_run_minimal() -> Result<()> {
         let (mut client_out_rx, server_out_tx) = tokio::io::duplex(1024);
         let (mut client_in_tx, server_in_rx) = tokio::io::duplex(1024);
