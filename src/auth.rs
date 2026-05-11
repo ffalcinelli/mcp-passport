@@ -497,9 +497,9 @@ async fn handle_callback(
         } else {
             crate::templates::DEFAULT_FAILURE_HTML.to_string()
         };
-        html = html.replace("{{ERROR_MESSAGE}}", "Invalid state");
-        html = html.replace("{{ISSUER_NAME}}", &state.issuer_name);
-        html = html.replace("{{RESOURCE_NAME}}", &state.resource_name);
+        html = html.replace("{{ERROR_MESSAGE}}", &escape_html("Invalid state"));
+        html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
+        html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
         return (
             axum::http::StatusCode::BAD_REQUEST,
             axum::response::Html(html),
@@ -516,8 +516,8 @@ async fn handle_callback(
         } else {
             crate::templates::DEFAULT_SUCCESS_HTML.to_string()
         };
-        html = html.replace("{{ISSUER_NAME}}", &state.issuer_name);
-        html = html.replace("{{RESOURCE_NAME}}", &state.resource_name);
+        html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
+        html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
         (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
     } else {
         let mut html = if let Some(dir) = &state.template_dir {
@@ -527,16 +527,42 @@ async fn handle_callback(
         } else {
             crate::templates::DEFAULT_FAILURE_HTML.to_string()
         };
-        html = html.replace("{{ERROR_MESSAGE}}", "Already authenticated or timed out.");
-        html = html.replace("{{ISSUER_NAME}}", &state.issuer_name);
-        html = html.replace("{{RESOURCE_NAME}}", &state.resource_name);
+        html = html.replace(
+            "{{ERROR_MESSAGE}}",
+            &escape_html("Already authenticated or timed out."),
+        );
+        html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
+        html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
         (axum::http::StatusCode::GONE, axum::response::Html(html)).into_response()
     }
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_escape_html() {
+        assert_eq!(escape_html("<script>"), "&lt;script&gt;");
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(
+            escape_html("\"double quotes\""),
+            "&quot;double quotes&quot;"
+        );
+        assert_eq!(escape_html("'single quotes'"), "&#39;single quotes&#39;");
+        assert_eq!(
+            escape_html("<img src=x onerror=alert(1)>"),
+            "&lt;img src=x onerror=alert(1)&gt;"
+        );
+    }
 
     #[tokio::test]
     async fn test_handle_callback_success() {
@@ -640,6 +666,38 @@ mod tests {
 
         let response = handle_callback(query, State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_handle_callback_xss_prevention() -> Result<()> {
+        let (tx, _rx) = oneshot::channel::<String>();
+        let state = AuthServerState {
+            expected_state: "test_state".to_string(),
+            tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+            template_dir: None,
+            issuer_name: "<script>alert('xss')</script>".to_string(),
+            resource_name: "<b>Bold Resource</b>".to_string(),
+        };
+
+        // 1. Invalid state case (triggering failure template)
+        let query_err = Query(AuthCallback {
+            code: "c".to_string(),
+            state: "wrong".to_string(),
+        });
+        let res_err = handle_callback(query_err, State(state.clone()))
+            .await
+            .into_response();
+        let body_err = axum::body::to_bytes(res_err.into_body(), 4096)
+            .await
+            .unwrap();
+        let html_err = String::from_utf8_lossy(&body_err);
+
+        assert!(html_err.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"));
+        assert!(html_err.contains("&lt;b&gt;Bold Resource&lt;/b&gt;"));
+        assert!(!html_err.contains("<script>"));
+        assert!(!html_err.contains("<b>"));
+
+        Ok(())
     }
 
     #[tokio::test]
