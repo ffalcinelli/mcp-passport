@@ -167,6 +167,17 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_nonexistent_token() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::new("mcp-passport-test-nonexistent");
+
+        let res = vault.delete_token("non_existent_user");
+        assert!(res.is_ok());
+
+        Ok(())
+    }
+
+    #[test]
     fn test_mutex_poison_recovery() -> Result<()> {
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let vault = Vault::new("mcp-passport-test");
