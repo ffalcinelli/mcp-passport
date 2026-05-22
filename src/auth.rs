@@ -249,12 +249,29 @@ impl AuthManager {
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
         let expected_state = state_val.clone();
 
+        let (success_html, failure_html) = if let Some(dir) = &self.template_dir {
+            (
+                tokio::fs::read_to_string(dir.join("success.html"))
+                    .await
+                    .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+                tokio::fs::read_to_string(dir.join("failure.html"))
+                    .await
+                    .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            )
+        } else {
+            (
+                crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+                crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            )
+        };
+
         let app = Router::new()
             .route("/callback", get(handle_callback))
             .with_state(AuthServerState {
                 expected_state,
                 tx,
-                template_dir: self.template_dir.clone(),
+                success_html,
+                failure_html,
                 issuer_name: self.issuer_name.clone(),
                 resource_name: self.resource_name.clone(),
             });
@@ -480,7 +497,8 @@ impl AuthManager {
 struct AuthServerState {
     expected_state: String,
     tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
-    template_dir: Option<std::path::PathBuf>,
+    success_html: String,
+    failure_html: String,
     issuer_name: String,
     resource_name: String,
 }
@@ -490,13 +508,7 @@ async fn handle_callback(
     State(state): State<AuthServerState>,
 ) -> impl IntoResponse {
     if query.state != state.expected_state {
-        let mut html = if let Some(dir) = &state.template_dir {
-            tokio::fs::read_to_string(dir.join("failure.html"))
-                .await
-                .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
-        } else {
-            crate::templates::DEFAULT_FAILURE_HTML.to_string()
-        };
+        let mut html = state.failure_html.clone();
         html = html.replace("{{ERROR_MESSAGE}}", &escape_html("Invalid state"));
         html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
         html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
@@ -509,24 +521,12 @@ async fn handle_callback(
     let mut lock = state.tx.lock().await;
     if let Some(s) = lock.take() {
         let _ = s.send(query.code.clone());
-        let mut html = if let Some(dir) = &state.template_dir {
-            tokio::fs::read_to_string(dir.join("success.html"))
-                .await
-                .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string())
-        } else {
-            crate::templates::DEFAULT_SUCCESS_HTML.to_string()
-        };
+        let mut html = state.success_html.clone();
         html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
         html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
         (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
     } else {
-        let mut html = if let Some(dir) = &state.template_dir {
-            tokio::fs::read_to_string(dir.join("failure.html"))
-                .await
-                .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string())
-        } else {
-            crate::templates::DEFAULT_FAILURE_HTML.to_string()
-        };
+        let mut html = state.failure_html.clone();
         html = html.replace(
             "{{ERROR_MESSAGE}}",
             &escape_html("Already authenticated or timed out."),
@@ -570,7 +570,8 @@ mod tests {
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
         };
@@ -596,7 +597,12 @@ mod tests {
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            template_dir: Some(temp_dir.clone()),
+            success_html: tokio::fs::read_to_string(temp_dir.join("success.html"))
+                .await
+                .unwrap(),
+            failure_html: tokio::fs::read_to_string(temp_dir.join("failure.html"))
+                .await
+                .unwrap(),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
         };
@@ -654,7 +660,8 @@ mod tests {
         let state = AuthServerState {
             expected_state: "expected".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
         };
@@ -674,7 +681,8 @@ mod tests {
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
             issuer_name: "<script>alert('xss')</script>".to_string(),
             resource_name: "<b>Bold Resource</b>".to_string(),
         };
