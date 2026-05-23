@@ -388,11 +388,19 @@ impl AuthManager {
         }
 
         if !skip_open && !has_listener {
-            if let Err(e) = open::that(&auth_url) {
-                warn!(
-                    "Failed to open browser automatically: {}. Please copy the URL above.",
-                    e
-                );
+            let is_safe_url = url::Url::parse(&auth_url)
+                .map(|u| u.scheme() == "http" || u.scheme() == "https")
+                .unwrap_or(false);
+
+            if is_safe_url {
+                if let Err(e) = open::that(&auth_url) {
+                    warn!(
+                        "Failed to open browser automatically: {}. Please copy the URL above.",
+                        e
+                    );
+                }
+            } else {
+                warn!("Skipping automatic browser open: URL scheme is not http or https. Please copy the URL above.");
             }
         } else {
             info!("Skipping automatic browser open (internal listener or skip flag present).");
