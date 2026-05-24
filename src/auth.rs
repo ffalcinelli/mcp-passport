@@ -546,11 +546,7 @@ async fn handle_callback(
 }
 
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    html_escape::encode_safe(s).to_string()
 }
 
 #[cfg(test)]
@@ -565,7 +561,7 @@ mod tests {
             escape_html("\"double quotes\""),
             "&quot;double quotes&quot;"
         );
-        assert_eq!(escape_html("'single quotes'"), "&#39;single quotes&#39;");
+        assert_eq!(escape_html("'single quotes'"), "&#x27;single quotes&#x27;");
         assert_eq!(
             escape_html("<img src=x onerror=alert(1)>"),
             "&lt;img src=x onerror=alert(1)&gt;"
@@ -708,8 +704,8 @@ mod tests {
             .unwrap();
         let html_err = String::from_utf8_lossy(&body_err);
 
-        assert!(html_err.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"));
-        assert!(html_err.contains("&lt;b&gt;Bold Resource&lt;/b&gt;"));
+        assert!(html_err.contains("&lt;script&gt;alert(&#x27;xss&#x27;)&lt;&#x2F;script&gt;"));
+        assert!(html_err.contains("&lt;b&gt;Bold Resource&lt;&#x2F;b&gt;"));
         assert!(!html_err.contains("<script>"));
         assert!(!html_err.contains("<b>"));
 
