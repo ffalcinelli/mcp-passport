@@ -517,8 +517,6 @@ impl Proxy {
                 last_reauth_count = Some(current_reauth_count);
             }
 
-            let token_for_trigger = token_opt.clone();
-
             let mut request = if let Some(token) = token_opt.as_ref() {
                 let dpop_key = match dpop_key_opt {
                     Some(ref key) => key,
@@ -577,7 +575,7 @@ impl Proxy {
 
                             if let Err(e) = self
                                 .trigger_reauth(
-                                    token_for_trigger.as_deref(),
+                                    token_opt.as_deref(),
                                     metadata_url.as_deref(),
                                     challenge.scope,
                                 )

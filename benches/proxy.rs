@@ -3,8 +3,8 @@ use mcp_passport::crypto::DpopKey;
 use mcp_passport::vault::Vault;
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let vault = Vault::new("bench_svc");
     std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+    let vault = Vault::new("bench_svc");
     let _ = vault.store_token("bench_user", "test_token_1234567890");
     let _ = vault.store_dpop_key("bench_user", &DpopKey::generate().to_bytes());
 
@@ -21,11 +21,17 @@ fn criterion_benchmark(c: &mut Criterion) {
     let cached_token = vault.get_token("bench_user").unwrap();
     let cached_dpop_key = vault.get_dpop_key("bench_user").unwrap();
 
-    c.bench_function("vault_cached", |b| {
+    c.bench_function("vault_cached_clone", |b| {
         b.iter(|| {
             let token = cached_token.clone();
-            let dpop_key = cached_dpop_key.clone();
-            std::hint::black_box((token, dpop_key));
+            std::hint::black_box(token);
+        })
+    });
+
+    c.bench_function("vault_cached_as_deref", |b| {
+        b.iter(|| {
+            let token = cached_token.as_deref();
+            std::hint::black_box(token);
         })
     });
 }
