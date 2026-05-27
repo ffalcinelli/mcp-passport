@@ -56,16 +56,16 @@ impl DpopKey {
     }
 
     /// Constructs the public JWK representation.
-    pub fn public_jwk(&self) -> Value {
+    pub fn public_jwk(&self) -> Result<Value> {
         let verifying_key = VerifyingKey::from(&self.signing_key);
         let encoded_point = verifying_key.to_encoded_point(false);
 
-        json!({
+        Ok(json!({
             "kty": "EC",
             "crv": "P-256",
-            "x": URL_SAFE_NO_PAD.encode(encoded_point.x().expect("P-256 must have x")),
-            "y": URL_SAFE_NO_PAD.encode(encoded_point.y().expect("P-256 must have y")),
-        })
+            "x": URL_SAFE_NO_PAD.encode(encoded_point.x().context("P-256 must have x")?),
+            "y": URL_SAFE_NO_PAD.encode(encoded_point.y().context("P-256 must have y")?),
+        }))
     }
 
     /// Generates a DPoP Proof JWT for a given HTTP method and URL.
@@ -81,7 +81,7 @@ impl DpopKey {
         htu: &str,
         access_token: Option<&str>,
     ) -> Result<String> {
-        let jwk = self.public_jwk();
+        let jwk = self.public_jwk()?;
 
         let header = json!({
             "typ": "dpop+jwt",
@@ -139,13 +139,14 @@ mod tests {
     }
 
     #[test]
-    fn test_public_jwk() {
+    fn test_public_jwk() -> Result<()> {
         let key = DpopKey::generate();
-        let jwk = key.public_jwk();
+        let jwk = key.public_jwk()?;
         assert_eq!(jwk["kty"], "EC");
         assert_eq!(jwk["crv"], "P-256");
         assert!(jwk.get("x").is_some());
         assert!(jwk.get("y").is_some());
+        Ok(())
     }
 
     #[test]
