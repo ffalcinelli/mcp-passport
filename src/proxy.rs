@@ -488,6 +488,33 @@ impl Proxy {
     }
 
     /// Handles SSE events from the server and pipes them back to stdio.
+    async fn handle_sse_unauthorized(
+        &self,
+        sse_url: &str,
+        resp: reqwest::Response,
+        token_opt: Option<&str>,
+    ) {
+        warn!(
+            "401 Unauthorized received in SSE listener ({}). Triggering re-authentication...",
+            sse_url
+        );
+
+        let challenge = WwwAuthenticate::parse(resp.headers());
+        let metadata_url = challenge
+            .resource_metadata
+            .or_else(|| derive_resource_url(&self.remote_url).ok());
+
+        if let Err(e) = self
+            .trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
+            .await
+        {
+            error!(
+                "Re-authentication flow failed in SSE listener: {:?}. Retrying connection in 5s...",
+                e
+            );
+        }
+    }
+
     pub async fn listen_sse(
         &self,
         sse_url: &str,
@@ -564,34 +591,17 @@ impl Proxy {
                     }
                     Ok(reqwest_eventsource::Event::Open) => info!("SSE connection established"),
                     Err(reqwest_eventsource::Error::InvalidStatusCode(status, resp)) => {
+                        source.close();
                         if status.as_u16() == 401 {
-                            warn!("401 Unauthorized received in SSE listener ({}). Triggering re-authentication...", sse_url);
-                            source.close();
-
-                            let challenge = WwwAuthenticate::parse(resp.headers());
-                            let metadata_url = challenge
-                                .resource_metadata
-                                .or_else(|| derive_resource_url(&self.remote_url).ok());
-
-                            if let Err(e) = self
-                                .trigger_reauth(
-                                    token_opt.as_deref(),
-                                    metadata_url.as_deref(),
-                                    challenge.scope,
-                                )
-                                .await
-                            {
-                                error!("Re-authentication flow failed in SSE listener: {:?}. Retrying connection in 5s...", e);
-                            }
-                            break;
+                            self.handle_sse_unauthorized(sse_url, resp, token_opt.as_deref())
+                                .await;
                         } else {
                             error!(
                                 "SSE error: Invalid status code {} from {}. Response: {:?}",
                                 status, sse_url, resp
                             );
-                            source.close();
-                            break;
                         }
+                        break;
                     }
                     Err(e) => {
                         error!("SSE error connecting to {}: {:?}", sse_url, e);
