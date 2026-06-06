@@ -136,6 +136,19 @@ impl Proxy {
         })
     }
 
+    fn load_credentials(&self) -> Result<(Option<String>, Option<DpopKey>)> {
+        let token_opt = self.vault.get_token(&self.user_id)?;
+        let dpop_key_opt = if token_opt.is_some() {
+            match self.vault.get_dpop_key(&self.user_id)? {
+                Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        Ok((token_opt, dpop_key_opt))
+    }
+
     async fn ensure_auth_manager(&self, metadata_url: Option<&str>) -> Result<Arc<AuthManager>> {
         {
             let lock = self.auth_manager.read().await;
@@ -190,15 +203,9 @@ impl Proxy {
             let current_reauth_count = { *self.reauth_count.read().await };
 
             if last_reauth_count != Some(current_reauth_count) {
-                token_opt = self.vault.get_token(&self.user_id)?;
-                if token_opt.is_some() {
-                    dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
-                        Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
-                        None => None,
-                    };
-                } else {
-                    dpop_key_opt = None;
-                }
+                let (new_token, new_dpop) = self.load_credentials()?;
+                token_opt = new_token;
+                dpop_key_opt = new_dpop;
                 last_reauth_count = Some(current_reauth_count);
             }
 
@@ -532,15 +539,9 @@ impl Proxy {
             let current_reauth_count = { *self.reauth_count.read().await };
 
             if last_reauth_count != Some(current_reauth_count) {
-                token_opt = self.vault.get_token(&self.user_id)?;
-                if token_opt.is_some() {
-                    dpop_key_opt = match self.vault.get_dpop_key(&self.user_id)? {
-                        Some(bytes) => Some(DpopKey::from_bytes(&bytes)?),
-                        None => None,
-                    };
-                } else {
-                    dpop_key_opt = None;
-                }
+                let (new_token, new_dpop) = self.load_credentials()?;
+                token_opt = new_token;
+                dpop_key_opt = new_dpop;
                 last_reauth_count = Some(current_reauth_count);
             }
 
@@ -854,6 +855,7 @@ mod tests {
 
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
+        println!("Error message: {}", err_msg);
         assert!(err_msg.contains("Maximum retry attempts reached"));
 
         // Initial (retry_count=0) + Retry 1 (retry_count=1) + Retry 2 (retry_count=2) = 3 attempts
