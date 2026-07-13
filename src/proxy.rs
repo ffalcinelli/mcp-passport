@@ -322,8 +322,9 @@ impl Proxy {
                 if challenge.error.as_deref() == Some("insufficient_scope") {
                     warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
 
-                    let metadata_url = validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
-                        .or_else(|| derive_resource_url(&self.remote_url).ok());
+                    let metadata_url =
+                        validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
+                            .or_else(|| derive_resource_url(&self.remote_url).ok());
 
                     self.trigger_reauth(
                         token_opt.as_deref(),
@@ -538,8 +539,9 @@ impl Proxy {
         );
 
         let challenge = WwwAuthenticate::parse(resp.headers());
-        let metadata_url = validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
-            .or_else(|| derive_resource_url(&self.remote_url).ok());
+        let metadata_url =
+            validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
+                .or_else(|| derive_resource_url(&self.remote_url).ok());
 
         if let Err(e) = self
             .trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
@@ -769,15 +771,13 @@ mod tests {
         // Match
         let valid = validate_resource_metadata(
             Some("http://localhost:8081/discovery".to_string()),
-            remote_url
+            remote_url,
         );
         assert_eq!(valid, Some("http://localhost:8081/discovery".to_string()));
 
         // Mismatch
-        let invalid = validate_resource_metadata(
-            Some("http://attacker.com/evil".to_string()),
-            remote_url
-        );
+        let invalid =
+            validate_resource_metadata(Some("http://attacker.com/evil".to_string()), remote_url);
         assert_eq!(invalid, None);
 
         // Missing
