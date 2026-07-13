@@ -739,6 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_manager_get_token_fresh() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let am = AuthManager {
             client_id: "c".into(),
             auth_url: "a".into(),
@@ -754,7 +755,6 @@ mod tests {
             resource_name: "Mock Resource".into(),
             template_dir: None,
         };
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         am.vault.store_token("user", "token")?;
 
         assert_eq!(am.get_token("user")?, Some("token".into()));
@@ -807,6 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_manager_reauthenticate_addr_in_use() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
 
