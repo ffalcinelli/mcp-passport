@@ -107,6 +107,37 @@ fn derive_resource_url(remote_url: &str) -> Result<String> {
     Ok(joined.to_string())
 }
 
+fn validate_resource_metadata(metadata_url: Option<String>, remote_url: &str) -> Option<String> {
+    let url_str = metadata_url?;
+
+    let m_url = match Url::parse(&url_str) {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("Failed to parse resource_metadata URL ({}): {}", url_str, e);
+            return None;
+        }
+    };
+
+    let r_url = match Url::parse(remote_url) {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("Failed to parse remote URL ({}): {}", remote_url, e);
+            return None;
+        }
+    };
+
+    if m_url.host_str() != r_url.host_str() {
+        warn!(
+            "SSRF Prevention: resource_metadata host ({:?}) does not match remote host ({:?}). Rejecting.",
+            m_url.host_str(),
+            r_url.host_str()
+        );
+        return None;
+    }
+
+    Some(url_str)
+}
+
 impl Proxy {
     /// Creates a new Proxy instance.
     pub fn new(
@@ -267,11 +298,12 @@ impl Proxy {
                 warn!("401 Unauthorized received. Activating Airlock suspension...");
                 let challenge = WwwAuthenticate::parse(response.headers());
 
-                let metadata_url = challenge.resource_metadata.or_else(|| {
-                    // Fallback to well-known at root if header is missing
-                    info!("WWW-Authenticate missing resource_metadata, falling back to root well-known...");
-                    derive_resource_url(&self.remote_url).ok()
-                });
+                let metadata_url = validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
+                    .or_else(|| {
+                        // Fallback to well-known at root if header is missing or SSRF check failed
+                        info!("WWW-Authenticate missing or invalid resource_metadata, falling back to root well-known...");
+                        derive_resource_url(&self.remote_url).ok()
+                    });
 
                 self.trigger_reauth(
                     token_opt.as_deref(),
@@ -290,9 +322,9 @@ impl Proxy {
                 if challenge.error.as_deref() == Some("insufficient_scope") {
                     warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
 
-                    let metadata_url = challenge
-                        .resource_metadata
-                        .or_else(|| derive_resource_url(&self.remote_url).ok());
+                    let metadata_url =
+                        validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
+                            .or_else(|| derive_resource_url(&self.remote_url).ok());
 
                     self.trigger_reauth(
                         token_opt.as_deref(),
@@ -507,9 +539,9 @@ impl Proxy {
         );
 
         let challenge = WwwAuthenticate::parse(resp.headers());
-        let metadata_url = challenge
-            .resource_metadata
-            .or_else(|| derive_resource_url(&self.remote_url).ok());
+        let metadata_url =
+            validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
+                .or_else(|| derive_resource_url(&self.remote_url).ok());
 
         if let Err(e) = self
             .trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
@@ -730,6 +762,27 @@ mod tests {
             "http://localhost:8081/.well-known/oauth-protected-resource"
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_validate_resource_metadata() {
+        let remote_url = "http://localhost:8081/rpc";
+
+        // Match
+        let valid = validate_resource_metadata(
+            Some("http://localhost:8081/discovery".to_string()),
+            remote_url,
+        );
+        assert_eq!(valid, Some("http://localhost:8081/discovery".to_string()));
+
+        // Mismatch
+        let invalid =
+            validate_resource_metadata(Some("http://attacker.com/evil".to_string()), remote_url);
+        assert_eq!(invalid, None);
+
+        // Missing
+        let missing = validate_resource_metadata(None, remote_url);
+        assert_eq!(missing, None);
     }
 
     #[test]
