@@ -184,7 +184,7 @@ mod tests {
 
         // Poison the mutex by panicking while holding the lock
         let _ = std::thread::spawn(|| {
-            let _lock = MEMORY_VAULT.lock().unwrap();
+            let _lock = MEMORY_VAULT.lock().unwrap_or_else(|e| e.into_inner());
             panic!("Poisoning the mutex");
         })
         .join();
