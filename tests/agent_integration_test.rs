@@ -58,6 +58,7 @@ async fn mock_mcp_handler(
 }
 
 #[tokio::test]
+#[ignore = "Requires Docker environment suitable for testcontainers"]
 async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     // 0. Setup environment and tracing
     std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
