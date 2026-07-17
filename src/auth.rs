@@ -87,8 +87,10 @@ pub struct AuthManager {
     internal_url_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
     /// Internal channel to communicate the callback server address.
     internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
-    /// Directory containing custom templates for success/failure pages.
-    template_dir: Option<std::path::PathBuf>,
+    /// Success template HTML.
+    success_html: String,
+    /// Failure template HTML.
+    failure_html: String,
     /// Human-friendly name of the identity provider.
     issuer_name: String,
     /// Human-friendly name of the protected resource.
@@ -196,6 +198,22 @@ impl AuthManager {
             resource.clone()
         };
 
+        let (success_html, failure_html) = if let Some(dir) = &oidc_config.template_dir {
+            (
+                tokio::fs::read_to_string(dir.join("success.html"))
+                    .await
+                    .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+                tokio::fs::read_to_string(dir.join("failure.html"))
+                    .await
+                    .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            )
+        } else {
+            (
+                crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+                crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            )
+        };
+
         Ok(Self {
             client_id: oidc_config.client_id,
             auth_url,
@@ -207,7 +225,8 @@ impl AuthManager {
             vault: Vault::new(service),
             internal_url_tx: oidc_config.internal_url_tx,
             internal_callback_tx: oidc_config.internal_callback_tx,
-            template_dir: oidc_config.template_dir,
+            success_html,
+            failure_html,
             issuer_name,
             resource_name,
         })
@@ -249,29 +268,13 @@ impl AuthManager {
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
         let expected_state = state_val.clone();
 
-        let (success_html, failure_html) = if let Some(dir) = &self.template_dir {
-            (
-                tokio::fs::read_to_string(dir.join("success.html"))
-                    .await
-                    .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
-                tokio::fs::read_to_string(dir.join("failure.html"))
-                    .await
-                    .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string()),
-            )
-        } else {
-            (
-                crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-                crate::templates::DEFAULT_FAILURE_HTML.to_string(),
-            )
-        };
-
         let app = Router::new()
             .route("/callback", get(handle_callback))
             .with_state(AuthServerState {
                 expected_state,
                 tx,
-                success_html,
-                failure_html,
+                success_html: self.success_html.clone(),
+                failure_html: self.failure_html.clone(),
                 issuer_name: self.issuer_name.clone(),
                 resource_name: self.resource_name.clone(),
             });
@@ -727,7 +730,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
         };
 
         let (tx, _rx) = oneshot::channel::<String>();
@@ -753,7 +757,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
         };
         am.vault.store_token("user", "token")?;
 
@@ -793,7 +798,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
         };
         let key = crate::crypto::DpopKey::generate();
         let code = AuthorizationCode::new("code".to_string());
@@ -824,7 +830,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
         };
 
         // This should fail after 5 retries because the port is occupied by 'listener'
@@ -861,7 +868,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            template_dir: None,
+            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
+            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
         };
 
         // Mock PAR response
