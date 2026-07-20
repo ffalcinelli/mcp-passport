@@ -128,7 +128,7 @@ struct ParResponse {
 impl AuthManager {
     /// Discovers OIDC endpoints via the discovery document or overrides.
     pub async fn discover(
-        oidc_config: OidcConfig,
+        mut oidc_config: OidcConfig,
         resource: String,
         service: &str,
         metadata_url_override: Option<&str>,
@@ -151,13 +151,13 @@ impl AuthManager {
 
             let auth = oidc_config
                 .auth_url_override
-                .clone()
+                .take()
                 .unwrap_or(doc.authorization_endpoint);
             let token = oidc_config
                 .token_url_override
-                .clone()
+                .take()
                 .unwrap_or(doc.token_endpoint);
-            let par = oidc_config.par_url_override.clone().or(doc.pushed_authorization_request_endpoint)
+            let par = oidc_config.par_url_override.take().or(doc.pushed_authorization_request_endpoint)
                 .context("Discovery document missing pushed_authorization_request_endpoint and no override provided")?;
 
             let name = doc.organization_name.unwrap_or(doc.issuer);
@@ -165,15 +165,15 @@ impl AuthManager {
         } else {
             let auth = oidc_config
                 .auth_url_override
-                .clone()
+                .take()
                 .context("auth_url is required when discovery_url is missing")?;
             let token = oidc_config
                 .token_url_override
-                .clone()
+                .take()
                 .context("token_url is required when discovery_url is missing")?;
             let par = oidc_config
                 .par_url_override
-                .clone()
+                .take()
                 .context("par_url is required when discovery_url is missing")?;
             (auth, token, par, "Custom Provider".to_string())
         };
