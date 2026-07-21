@@ -7,15 +7,23 @@ fn auth_benchmark(c: &mut Criterion) {
     rt.block_on(async {
         let success_path = dir.join("success.html");
         let failure_path = dir.join("failure.html");
-        tokio::fs::write(&success_path, "<html>success</html>").await.unwrap();
-        tokio::fs::write(&failure_path, "<html>failure</html>").await.unwrap();
+        tokio::fs::write(&success_path, "<html>success</html>")
+            .await
+            .unwrap();
+        tokio::fs::write(&failure_path, "<html>failure</html>")
+            .await
+            .unwrap();
     });
 
     c.bench_function("template_load_sequential", |b| {
         b.iter(|| {
             rt.block_on(async {
-                let success_html = tokio::fs::read_to_string(dir.join("success.html")).await.unwrap();
-                let failure_html = tokio::fs::read_to_string(dir.join("failure.html")).await.unwrap();
+                let success_html = tokio::fs::read_to_string(dir.join("success.html"))
+                    .await
+                    .unwrap();
+                let failure_html = tokio::fs::read_to_string(dir.join("failure.html"))
+                    .await
+                    .unwrap();
                 std::hint::black_box((success_html, failure_html));
             })
         })
