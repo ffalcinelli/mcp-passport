@@ -88,9 +88,9 @@ pub struct AuthManager {
     /// Internal channel to communicate the callback server address.
     internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
     /// Success template HTML.
-    success_html: String,
+    success_html: Arc<String>,
     /// Failure template HTML.
-    failure_html: String,
+    failure_html: Arc<String>,
     /// Human-friendly name of the identity provider.
     issuer_name: String,
     /// Human-friendly name of the protected resource.
@@ -225,8 +225,8 @@ impl AuthManager {
             vault: Vault::new(service),
             internal_url_tx: oidc_config.internal_url_tx,
             internal_callback_tx: oidc_config.internal_callback_tx,
-            success_html,
-            failure_html,
+            success_html: Arc::new(success_html),
+            failure_html: Arc::new(failure_html),
             issuer_name,
             resource_name,
         })
@@ -508,8 +508,8 @@ impl AuthManager {
 struct AuthServerState {
     expected_state: String,
     tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
-    success_html: String,
-    failure_html: String,
+    success_html: Arc<String>,
+    failure_html: Arc<String>,
     issuer_name: String,
     resource_name: String,
 }
@@ -519,7 +519,7 @@ async fn handle_callback(
     State(state): State<AuthServerState>,
 ) -> impl IntoResponse {
     if query.state != state.expected_state {
-        let mut html = state.failure_html.clone();
+        let mut html = (*state.failure_html).clone();
         html = html.replace("{{ERROR_MESSAGE}}", &escape_html("Invalid state"));
         html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
         html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
@@ -532,12 +532,12 @@ async fn handle_callback(
     let mut lock = state.tx.lock().await;
     if let Some(s) = lock.take() {
         let _ = s.send(query.code.clone());
-        let mut html = state.success_html.clone();
+        let mut html = (*state.success_html).clone();
         html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
         html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
         (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
     } else {
-        let mut html = state.failure_html.clone();
+        let mut html = (*state.failure_html).clone();
         html = html.replace(
             "{{ERROR_MESSAGE}}",
             &escape_html("Already authenticated or timed out."),
@@ -577,8 +577,8 @@ mod tests {
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
         };
@@ -604,12 +604,16 @@ mod tests {
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            success_html: tokio::fs::read_to_string(temp_dir.join("success.html"))
-                .await
-                .unwrap(),
-            failure_html: tokio::fs::read_to_string(temp_dir.join("failure.html"))
-                .await
-                .unwrap(),
+            success_html: std::sync::Arc::new(
+                tokio::fs::read_to_string(temp_dir.join("success.html"))
+                    .await
+                    .unwrap(),
+            ),
+            failure_html: std::sync::Arc::new(
+                tokio::fs::read_to_string(temp_dir.join("failure.html"))
+                    .await
+                    .unwrap(),
+            ),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
         };
@@ -667,8 +671,8 @@ mod tests {
         let state = AuthServerState {
             expected_state: "expected".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
         };
@@ -688,8 +692,8 @@ mod tests {
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             issuer_name: "<script>alert('xss')</script>".to_string(),
             resource_name: "<b>Bold Resource</b>".to_string(),
         };
@@ -730,8 +734,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
         };
 
         let (tx, _rx) = oneshot::channel::<String>();
@@ -757,8 +761,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
         };
         am.vault.store_token("user", "token")?;
 
@@ -798,8 +802,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
         };
         let key = crate::crypto::DpopKey::generate();
         let code = AuthorizationCode::new("code".to_string());
@@ -830,8 +834,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
         };
 
         // This should fail after 5 retries because the port is occupied by 'listener'
@@ -868,8 +872,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
             resource_name: "Mock Resource".into(),
-            success_html: crate::templates::DEFAULT_SUCCESS_HTML.to_string(),
-            failure_html: crate::templates::DEFAULT_FAILURE_HTML.to_string(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
         };
 
         // Mock PAR response
