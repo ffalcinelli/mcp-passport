@@ -660,6 +660,42 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
 
     #[test]
+    fn test_proxy_new() {
+        let remote_url = "http://example.com/mcp";
+        let user_id = "test_user_id";
+        let oidc_config = OidcConfig {
+            discovery_url: Some("http://example.com/discovery".to_string()),
+            client_id: "test_client_id".to_string(),
+            redirect_url: "http://localhost:8080/callback".to_string(),
+            auth_url_override: None,
+            token_url_override: None,
+            par_url_override: None,
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            template_dir: None,
+        };
+        let service = "test_service";
+        let protocol_version = "2024-11-05";
+        let auth_scheme = AuthScheme::Dpop;
+
+        let proxy = Proxy::new(
+            remote_url,
+            user_id,
+            oidc_config.clone(),
+            service,
+            protocol_version,
+            auth_scheme.clone(),
+        );
+
+        assert_eq!(proxy.remote_url, remote_url);
+        assert_eq!(proxy.user_id, user_id);
+        assert_eq!(proxy.oidc_config.discovery_url, oidc_config.discovery_url);
+        assert_eq!(proxy.oidc_config.client_id, oidc_config.client_id);
+        assert_eq!(proxy.protocol_version, protocol_version);
+        assert_eq!(proxy.auth_scheme, auth_scheme);
+    }
+
+    #[test]
     fn test_www_authenticate_parse_quoted() {
         let mut headers = HeaderMap::new();
         headers.insert(
