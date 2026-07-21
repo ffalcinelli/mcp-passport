@@ -170,6 +170,27 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_proof_success() -> Result<()> {
+        let key = DpopKey::generate();
+        let proof = key.generate_proof("GET", "https://api.example.com/resource")?;
+
+        let parts: Vec<&str> = proof.split('.').collect();
+        assert_eq!(parts.len(), 3, "Proof must have 3 parts");
+
+        let claims_json: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
+        assert_eq!(claims_json["htm"], "GET");
+        assert_eq!(claims_json["htu"], "https://api.example.com/resource");
+
+        // Assert that 'ath' claim is not present when calling generate_proof (wrapper without ath)
+        assert!(
+            claims_json.get("ath").is_none(),
+            "ath claim should not be present in wrapper generate_proof"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_generate_proof_signature() -> Result<()> {
         use p256::ecdsa::signature::Verifier;
 
