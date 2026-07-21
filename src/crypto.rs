@@ -182,7 +182,10 @@ mod tests {
         assert_eq!(claims_json["htu"], "https://api.example.com/resource");
 
         // Assert that 'ath' claim is not present when calling generate_proof (wrapper without ath)
-        assert!(claims_json.get("ath").is_none(), "ath claim should not be present in wrapper generate_proof");
+        assert!(
+            claims_json.get("ath").is_none(),
+            "ath claim should not be present in wrapper generate_proof"
+        );
 
         Ok(())
     }
