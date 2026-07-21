@@ -60,3 +60,7 @@ criterion = "0.8.2"
 [[bench]]
 name = "proxy"
 harness = false
+
+[[bench]]
+name = "auth"
+harness = false

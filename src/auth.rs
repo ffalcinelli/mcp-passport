@@ -199,13 +199,13 @@ impl AuthManager {
         };
 
         let (success_html, failure_html) = if let Some(dir) = &oidc_config.template_dir {
-            (
-                tokio::fs::read_to_string(dir.join("success.html"))
-                    .await
-                    .unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            let (success_res, failure_res) = tokio::join!(
+                tokio::fs::read_to_string(dir.join("success.html")),
                 tokio::fs::read_to_string(dir.join("failure.html"))
-                    .await
-                    .unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            );
+            (
+                success_res.unwrap_or_else(|_| crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+                failure_res.unwrap_or_else(|_| crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             )
         } else {
             (
