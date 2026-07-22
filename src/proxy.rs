@@ -660,6 +660,39 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
 
     #[test]
+    fn test_www_authenticate_parse_empty_headers() {
+        let headers = HeaderMap::new();
+        let auth = WwwAuthenticate::parse(&headers);
+        assert_eq!(auth.resource_metadata, None);
+        assert_eq!(auth.scope, None);
+        assert_eq!(auth.error, None);
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_invalid_utf8() {
+        let mut headers = HeaderMap::new();
+        let header_value = HeaderValue::from_bytes(b"Bearer \xFF\xFF").unwrap();
+        headers.insert(WWW_AUTHENTICATE, header_value);
+
+        let auth = WwwAuthenticate::parse(&headers);
+        assert_eq!(auth.resource_metadata, None);
+        assert_eq!(auth.scope, None);
+        assert_eq!(auth.error, None);
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_missing_parameters() {
+        let mut headers = HeaderMap::new();
+        let header_value = HeaderValue::from_str("Bearer some_other_param=\"value\"").unwrap();
+        headers.insert(WWW_AUTHENTICATE, header_value);
+
+        let auth = WwwAuthenticate::parse(&headers);
+        assert_eq!(auth.resource_metadata, None);
+        assert_eq!(auth.scope, None);
+        assert_eq!(auth.error, None);
+    }
+
+    #[test]
     fn test_proxy_new() {
         let remote_url = "http://example.com/mcp";
         let user_id = "test_user_id";
