@@ -619,7 +619,7 @@ impl Proxy {
             while let Some(event) = source.next().await {
                 match event {
                     Ok(reqwest_eventsource::Event::Message(message)) => {
-                        tracing::debug!("Received SSE message");
+                        tracing::debug!(event = %message.event, id = %message.id, "Received SSE message");
                         let _ = stdout_tx.send(message.data).await;
                     }
                     Ok(reqwest_eventsource::Event::Open) => info!("SSE connection established"),
