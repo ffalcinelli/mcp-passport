@@ -519,10 +519,12 @@ async fn handle_callback(
     State(state): State<AuthServerState>,
 ) -> impl IntoResponse {
     if query.state != state.expected_state {
-        let mut html = (*state.failure_html).clone();
-        html = html.replace("{{ERROR_MESSAGE}}", &escape_html("Invalid state"));
-        html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
-        html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
+        let html = render_template(
+            &state.failure_html,
+            Some("Invalid state"),
+            &state.issuer_name,
+            &state.resource_name,
+        );
         return (
             axum::http::StatusCode::BAD_REQUEST,
             axum::response::Html(html),
@@ -532,24 +534,72 @@ async fn handle_callback(
     let mut lock = state.tx.lock().await;
     if let Some(s) = lock.take() {
         let _ = s.send(query.code.clone());
-        let mut html = (*state.success_html).clone();
-        html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
-        html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
+        let html = render_template(
+            &state.success_html,
+            None,
+            &state.issuer_name,
+            &state.resource_name,
+        );
         (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
     } else {
-        let mut html = (*state.failure_html).clone();
-        html = html.replace(
-            "{{ERROR_MESSAGE}}",
-            &escape_html("Already authenticated or timed out."),
+        let html = render_template(
+            &state.failure_html,
+            Some("Already authenticated or timed out."),
+            &state.issuer_name,
+            &state.resource_name,
         );
-        html = html.replace("{{ISSUER_NAME}}", &escape_html(&state.issuer_name));
-        html = html.replace("{{RESOURCE_NAME}}", &escape_html(&state.resource_name));
         (axum::http::StatusCode::GONE, axum::response::Html(html)).into_response()
     }
 }
 
 fn escape_html(s: &str) -> String {
     html_escape::encode_safe(s).to_string()
+}
+
+fn render_template(
+    template: &str,
+    error_message: Option<&str>,
+    issuer_name: &str,
+    resource_name: &str,
+) -> String {
+    let mut result = String::with_capacity(template.len());
+    let mut rest = template;
+
+    while let Some(start) = rest.find("{{") {
+        result.push_str(&rest[..start]);
+        rest = &rest[start + 2..];
+
+        if let Some(end) = rest.find("}}") {
+            let key = &rest[..end];
+            rest = &rest[end + 2..];
+
+            match key {
+                "ERROR_MESSAGE" => {
+                    if let Some(msg) = error_message {
+                        result.push_str(&escape_html(msg));
+                    } else {
+                        result.push_str("{{ERROR_MESSAGE}}");
+                    }
+                }
+                "ISSUER_NAME" => {
+                    result.push_str(&escape_html(issuer_name));
+                }
+                "RESOURCE_NAME" => {
+                    result.push_str(&escape_html(resource_name));
+                }
+                _ => {
+                    result.push_str("{{");
+                    result.push_str(key);
+                    result.push_str("}}");
+                }
+            }
+        } else {
+            result.push_str("{{");
+            break;
+        }
+    }
+    result.push_str(rest);
+    result
 }
 
 #[cfg(test)]
