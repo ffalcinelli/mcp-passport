@@ -1,0 +1,31 @@
+yes = false
+upgrade_strategy = "latest"
+concurrency = 10
+ignore = []
+no_security_feedback = false
+
+vetted = [
+    { ref = "actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332" },
+    { ref = "actions/setup-node@601291da96165b6a1d4b1fb337131252d6e2735d" },
+    { ref = "actions/setup-python@82c7e60c44059a00283f090ceb68f6854d17dcef" },
+    { ref = "actions/setup-go@cd9a547d6d5b9454b6754024774b752817bf0a26" },
+    { ref = "actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9" },
+    { ref = "actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808" },
+    { ref = "actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3d2e" },
+    { ref = "de0fac2e4500dabe0009e67214ff5f5447ce83dd" },
+    { ref = "e97e2d8cc328f1b50210efc529dca0028893a2d9" },
+    { ref = "c19371144df3bb44fab255c43d04cbc2ab54d1c4" },
+    { ref = "9b8bc12246e335ecab7af4c551115458fff9a951" },
+    { ref = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" },
+    { ref = "57e3a136b779b570ffcdbf80b3bdc90e7fab3de2" },
+    { ref = "45bfe0192ca1faeb007ade9deae92b16b8254a0d" },
+    { ref = "fc324d3547104276b827a68afc52ff2a11cc49c9" },
+    { ref = "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128" },
+    { ref = "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10", tag = "v6.0.3", timestamp = "2026-06-18T15:42:34Z" },
+    { ref = "taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5", tag = "v2.82.0", timestamp = "2026-06-18T15:42:34Z" },
+    { ref = "codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f", tag = "v7.0.0", timestamp = "2026-06-18T15:42:34Z" },
+    { ref = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", tag = "v7.0.1", timestamp = "2026-07-27T12:08:01Z" },
+    { ref = "taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf", tag = "v2.85.2", timestamp = "2026-07-27T12:08:01Z" }
+]
+
+compromised = []
