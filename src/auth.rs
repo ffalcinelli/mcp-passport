@@ -362,10 +362,12 @@ impl AuthManager {
             .await?;
 
         if !par_res.status().is_success() {
+            let status = par_res.status();
             let error_text = par_res.text().await?;
-            error!("PAR request failed: {}", error_text);
+            tracing::debug!("PAR request failed with payload: {}", error_text);
+            error!("PAR request failed with status: {}", status);
             server_handle.abort();
-            anyhow::bail!("PAR request failed: {}", error_text);
+            anyhow::bail!("PAR request failed with status: {}", status);
         }
 
         let par_data: ParResponse = par_res.json().await?;
@@ -481,9 +483,11 @@ impl AuthManager {
             .await?;
 
         if !res.status().is_success() {
+            let status = res.status();
             let err = res.text().await?;
-            error!("Token exchange failed: {}", err);
-            anyhow::bail!("Token exchange failed: {}", err);
+            tracing::debug!("Token exchange failed with payload: {}", err);
+            error!("Token exchange failed with status: {}", status);
+            anyhow::bail!("Token exchange failed with status: {}", status);
         }
 
         #[derive(Deserialize)]
