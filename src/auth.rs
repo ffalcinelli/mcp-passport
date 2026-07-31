@@ -647,6 +647,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_auth_manager_set_internal_callback_tx() {
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "a".into(),
+            token_url: "t".into(),
+            par_url: "p".into(),
+            redirect_url: "r".into(),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::new("svc_test_set_internal_callback_tx"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            issuer_name: "Mock Issuer".into(),
+            resource_name: "Mock Resource".into(),
+            success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
+            failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+        };
+
+        let (tx, _rx) = oneshot::channel::<SocketAddr>();
+        am.set_internal_callback_tx(tx).await;
+
+        let lock = am.internal_callback_tx.lock().await;
+        assert!(lock.is_some());
+    }
+
+    #[tokio::test]
     async fn test_handle_callback_success() {
         let (tx, mut rx) = oneshot::channel::<String>();
         let state = AuthServerState {
