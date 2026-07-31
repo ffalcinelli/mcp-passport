@@ -268,7 +268,9 @@ impl AuthManager {
         let (server_handle, rx) = self.setup_loopback_server(expected_state).await?;
 
         // 4. Pushed Authorization Request (PAR)
-        let par_data = self.perform_par_request(pkce_challenge.as_str(), &state_val, scopes, &server_handle).await?;
+        let par_data = self
+            .perform_par_request(pkce_challenge.as_str(), &state_val, scopes, &server_handle)
+            .await?;
 
         // 5. Direct user to Auth URL
         self.open_auth_url(&par_data, url_tx).await;
@@ -307,7 +309,6 @@ impl AuthManager {
 
         Ok(())
     }
-
 
     async fn setup_loopback_server(
         &self,
@@ -429,11 +430,7 @@ impl AuthManager {
         Ok(par_data)
     }
 
-    async fn open_auth_url(
-        &self,
-        par_data: &ParResponse,
-        url_tx: Option<oneshot::Sender<String>>,
-    ) {
+    async fn open_auth_url(&self, par_data: &ParResponse, url_tx: Option<oneshot::Sender<String>>) {
         let auth_url = format!(
             "{}?client_id={}&response_type=code&request_uri={}",
             self.auth_url, self.client_id, par_data.request_uri
