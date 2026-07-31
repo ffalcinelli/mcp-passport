@@ -264,9 +264,57 @@ impl AuthManager {
         let state_val = csrf_token.secret().clone();
 
         // 3. Setup Loopback Server to catch the callback
+        let expected_state = state_val.clone();
+        let (server_handle, rx) = self.setup_loopback_server(expected_state).await?;
+
+        // 4. Pushed Authorization Request (PAR)
+        let par_data = self.perform_par_request(pkce_challenge.as_str(), &state_val, scopes, &server_handle).await?;
+
+        // 5. Direct user to Auth URL
+        self.open_auth_url(&par_data, url_tx).await;
+
+        // 6. Wait for code from callback
+        let timeout_duration = if cfg!(test) {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_secs(300)
+        };
+        let code = match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(c)) => c,
+            _ => {
+                server_handle.abort();
+                anyhow::bail!("Authentication timed out or failed to receive callback");
+            }
+        };
+        server_handle.abort();
+
+        // 7. Token Exchange with DPoP
+        info!("Step 2: Exchanging code for DPoP-bound token...");
+        let _oauth_client = BasicClient::new(ClientId::new(self.client_id.clone()))
+            .set_auth_uri(AuthUrl::new(self.auth_url.clone())?)
+            .set_token_uri(TokenUrl::new(self.token_url.clone())?)
+            .set_redirect_uri(RedirectUrl::new(self.redirect_url.clone())?);
+
+        // We use manual token exchange because FAPI 2.0 requires DPoP in headers,
+        // which the oauth2 crate doesn't natively support yet for the exchange_code call.
+        self.manual_token_exchange(
+            user_id,
+            &AuthorizationCode::new(code),
+            &pkce_verifier,
+            &dpop_key,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+
+    async fn setup_loopback_server(
+        &self,
+        expected_state: String,
+    ) -> Result<(tokio::task::JoinHandle<()>, oneshot::Receiver<String>)> {
         let (tx, rx) = oneshot::channel::<String>();
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
-        let expected_state = state_val.clone();
 
         let app = Router::new()
             .route("/callback", get(handle_callback))
@@ -331,15 +379,24 @@ impl AuthManager {
             }
         });
 
-        // 4. Pushed Authorization Request (PAR)
+        Ok((server_handle, rx))
+    }
+
+    async fn perform_par_request(
+        &self,
+        pkce_challenge: &str,
+        state_val: &str,
+        scopes: Option<Vec<String>>,
+        server_handle: &tokio::task::JoinHandle<()>,
+    ) -> Result<ParResponse> {
         info!("Step 1: Pushed Authorization Request (PAR)...");
         let mut par_params = vec![
             ("client_id", self.client_id.as_str()),
             ("response_type", "code"),
             ("redirect_uri", self.redirect_url.as_str()),
-            ("code_challenge", pkce_challenge.as_str()),
+            ("code_challenge", pkce_challenge),
             ("code_challenge_method", "S256"),
-            ("state", &state_val),
+            ("state", state_val),
             ("resource", self.resource.as_str()),
         ];
 
@@ -369,8 +426,14 @@ impl AuthManager {
         }
 
         let par_data: ParResponse = par_res.json().await?;
+        Ok(par_data)
+    }
 
-        // 5. Direct user to Auth URL
+    async fn open_auth_url(
+        &self,
+        par_data: &ParResponse,
+        url_tx: Option<oneshot::Sender<String>>,
+    ) {
         let auth_url = format!(
             "{}?client_id={}&response_type=code&request_uri={}",
             self.auth_url, self.client_id, par_data.request_uri
@@ -418,42 +481,7 @@ impl AuthManager {
                 let _ = tx_url.send(auth_url.clone());
             }
         }
-
-        // 6. Wait for code from callback
-        let timeout_duration = if cfg!(test) {
-            std::time::Duration::from_millis(500)
-        } else {
-            std::time::Duration::from_secs(300)
-        };
-        let code = match tokio::time::timeout(timeout_duration, rx).await {
-            Ok(Ok(c)) => c,
-            _ => {
-                server_handle.abort();
-                anyhow::bail!("Authentication timed out or failed to receive callback");
-            }
-        };
-        server_handle.abort();
-
-        // 7. Token Exchange with DPoP
-        info!("Step 2: Exchanging code for DPoP-bound token...");
-        let _oauth_client = BasicClient::new(ClientId::new(self.client_id.clone()))
-            .set_auth_uri(AuthUrl::new(self.auth_url.clone())?)
-            .set_token_uri(TokenUrl::new(self.token_url.clone())?)
-            .set_redirect_uri(RedirectUrl::new(self.redirect_url.clone())?);
-
-        // We use manual token exchange because FAPI 2.0 requires DPoP in headers,
-        // which the oauth2 crate doesn't natively support yet for the exchange_code call.
-        self.manual_token_exchange(
-            user_id,
-            &AuthorizationCode::new(code),
-            &pkce_verifier,
-            &dpop_key,
-        )
-        .await?;
-
-        Ok(())
     }
-
     async fn manual_token_exchange(
         &self,
         user_id: &str,
