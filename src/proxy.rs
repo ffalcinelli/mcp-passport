@@ -82,19 +82,25 @@ impl WwwAuthenticate {
 }
 
 fn extract_param(header: &str, param: &str) -> Option<String> {
-    let needle = format!("{}=", param);
-    if let Some(start) = header.find(&needle) {
-        let val_start = start + needle.len();
-        let remainder = &header[val_start..];
-        if let Some(stripped) = remainder.strip_prefix('"') {
-            if let Some(end) = stripped.find('"') {
-                return Some(stripped[..end].to_string());
+    if param.is_empty() {
+        return None;
+    }
+    let mut start = 0;
+    while let Some(pos) = header[start..].find(param) {
+        let absolute_pos = start + pos;
+        let after_param = &header[absolute_pos + param.len()..];
+        if let Some(remainder) = after_param.strip_prefix('=') {
+            if let Some(stripped) = remainder.strip_prefix('"') {
+                if let Some(end) = stripped.find('"') {
+                    return Some(stripped[..end].to_string());
+                }
+            } else {
+                // Unquoted: take until comma or end of string
+                let end = remainder.find(',').unwrap_or(remainder.len());
+                return Some(remainder[..end].trim().to_string());
             }
-        } else {
-            // Unquoted: take until comma or end of string
-            let end = remainder.find(',').unwrap_or(remainder.len());
-            return Some(remainder[..end].trim().to_string());
         }
+        start = absolute_pos + param.len();
     }
     None
 }
