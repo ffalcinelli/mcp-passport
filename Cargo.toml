@@ -68,3 +68,7 @@ harness = false
 [[bench]]
 name = "auth_state_bench"
 harness = false
+
+[[bench]]
+name = "auth_scopes_bench"
+harness = false
