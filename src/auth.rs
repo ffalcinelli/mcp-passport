@@ -401,12 +401,8 @@ impl AuthManager {
             ("resource", self.resource.as_str()),
         ];
 
-        let mut s_vec = if let Some(ref s) = scopes {
-            s.clone()
-        } else {
-            vec![]
-        };
-        if !s_vec.contains(&"openid".to_string()) {
+        let mut s_vec = scopes.unwrap_or_default();
+        if !s_vec.iter().any(|s| s == "openid") {
             s_vec.push("openid".to_string());
         }
         let scope_str = s_vec.join(" ");
