@@ -43,10 +43,8 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     c.bench_function("extract_param_original", |b| {
         b.iter(|| {
-            let res = extract_param_original(
-                std::hint::black_box(header),
-                std::hint::black_box("error")
-            );
+            let res =
+                extract_param_original(std::hint::black_box(header), std::hint::black_box("error"));
             std::hint::black_box(res);
         })
     });
@@ -55,7 +53,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         b.iter(|| {
             let res = extract_param_optimized(
                 std::hint::black_box(header),
-                std::hint::black_box("error")
+                std::hint::black_box("error"),
             );
             std::hint::black_box(res);
         })
