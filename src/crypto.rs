@@ -224,8 +224,18 @@ mod tests {
         let proof =
             key.generate_proof_with_ath("GET", "https://api.example.com/sse", Some(access_token))?;
         let parts: Vec<&str> = proof.split('.').collect();
+        assert_eq!(parts.len(), 3);
+
+        let header_json: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0])?)?;
+        assert_eq!(header_json["typ"], "dpop+jwt");
+        assert_eq!(header_json["alg"], "ES256");
+        assert!(header_json.get("jwk").is_some());
 
         let claims_json: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1])?)?;
+        assert_eq!(claims_json["htm"], "GET");
+        assert_eq!(claims_json["htu"], "https://api.example.com/sse");
+        assert!(claims_json.get("jti").is_some());
+        assert!(claims_json.get("iat").is_some());
         assert!(claims_json.get("ath").is_some());
 
         let mut hasher = Sha256::new();
