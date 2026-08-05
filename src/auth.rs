@@ -121,8 +121,6 @@ struct AuthCallback {
 #[derive(Deserialize)]
 struct ParResponse {
     request_uri: String,
-    #[allow(dead_code)]
-    expires_in: u64,
 }
 
 impl AuthManager {
