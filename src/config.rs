@@ -148,5 +148,65 @@ mod tests {
         let args = vec!["mcp-passport"];
         let result = Config::try_parse_from(args);
         assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn test_config_invalid_enum_value() {
+        let args = vec![
+            "mcp-passport",
+            "--remote-mcp-url",
+            "http://mcp/rpc",
+            "--remote-sse-url",
+            "http://mcp/sse",
+            "--auth-scheme",
+            "invalid",
+        ];
+        let result = Config::try_parse_from(args);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            clap::error::ErrorKind::InvalidValue
+        );
+    }
+
+    #[test]
+    fn test_config_unknown_argument() {
+        let args = vec![
+            "mcp-passport",
+            "--remote-mcp-url",
+            "http://mcp/rpc",
+            "--remote-sse-url",
+            "http://mcp/sse",
+            "--unknown-arg",
+            "value",
+        ];
+        let result = Config::try_parse_from(args);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            clap::error::ErrorKind::UnknownArgument
+        );
+    }
+
+    #[test]
+    fn test_config_missing_value() {
+        let args = vec![
+            "mcp-passport",
+            "--remote-mcp-url",
+            "http://mcp/rpc",
+            "--remote-sse-url",
+            "http://mcp/sse",
+            "--oidc-client-id", // Missing value
+        ];
+        let result = Config::try_parse_from(args);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            clap::error::ErrorKind::InvalidValue
+        );
     }
 }
