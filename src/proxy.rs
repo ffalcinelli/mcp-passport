@@ -817,6 +817,58 @@ mod tests {
     }
 
     #[test]
+    fn test_www_authenticate_parse_unclosed_quote() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer scope=\"mcp:all"),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(challenge.scope, None);
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_empty_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer scope=\"\""),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(challenge.scope, Some(vec![]));
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_extra_spacing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer scope=\"read   write\""),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(
+            challenge.scope,
+            Some(vec!["read".to_string(), "write".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_www_authenticate_parse_substring_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer myscope=\"admin\""),
+        );
+        let challenge = WwwAuthenticate::parse(&headers);
+        assert_eq!(challenge.scope, Some(vec!["admin".to_string()]));
+    }
+
+    #[test]
+    fn test_extract_param_empty_param() {
+        assert_eq!(extract_param("Bearer scope=\"admin\"", ""), None);
+    }
+
+    #[test]
     fn test_extract_param_not_found() {
         assert_eq!(extract_param("Bearer scope=all", "error"), None);
     }
