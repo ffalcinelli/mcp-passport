@@ -23,6 +23,29 @@ INTROSPECT_URL = f"{KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token/intro
 CLIENT_ID = os.environ.get("CLIENT_ID", "mock-mcp")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "mock-mcp-secret")
 
+def is_valid_htu(htu: str, url: str) -> bool:
+    if not htu or not url:
+        return False
+    if htu == url:
+        return True
+    try:
+        parsed_htu = urllib.parse.urlsplit(htu)
+        parsed_url = urllib.parse.urlsplit(url)
+
+        if (parsed_htu.scheme != parsed_url.scheme or
+            parsed_htu.port != parsed_url.port or
+            parsed_htu.path != parsed_url.path or
+            parsed_htu.query != parsed_url.query):
+            return False
+
+        allowed_hosts = {"localhost", "::1", "127.0.0.1"}
+        if parsed_htu.hostname in allowed_hosts and parsed_url.hostname in allowed_hosts:
+            return True
+
+        return False
+    except Exception:
+        return False
+
 def validate_dpop_proof(dpop: str, method: str, url: str, access_token: str):
     if not dpop:
         raise HTTPException(status_code=401, detail="Missing DPoP header")
@@ -50,11 +73,8 @@ def validate_dpop_proof(dpop: str, method: str, url: str, access_token: str):
         
         if payload.get("htm") != method:
             raise HTTPException(status_code=401, detail="Invalid htm in DPoP proof")
-        if payload.get("htu") != url:
-            # Handle potential localhost vs ::1 mismatch
-            if not ("::1" in payload.get("htu") and "localhost" in url) and \
-               not ("localhost" in payload.get("htu") and "::1" in url):
-                raise HTTPException(status_code=401, detail=f"Invalid htu in DPoP proof. Expected {url}, got {payload.get('htu')}")
+        if not is_valid_htu(payload.get("htu"), url):
+            raise HTTPException(status_code=401, detail=f"Invalid htu in DPoP proof. Expected {url}, got {payload.get('htu')}")
             
         ath = payload.get("ath")
         if not ath:
