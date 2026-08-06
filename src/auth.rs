@@ -20,8 +20,8 @@ use axum::{
     Router,
 };
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, TokenUrl,
+    AuthorizationCode, CsrfToken, PkceCodeChallenge,
+    PkceCodeVerifier,
 };
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
@@ -290,10 +290,6 @@ impl AuthManager {
 
         // 7. Token Exchange with DPoP
         info!("Step 2: Exchanging code for DPoP-bound token...");
-        let _oauth_client = BasicClient::new(ClientId::new(self.client_id.clone()))
-            .set_auth_uri(AuthUrl::new(self.auth_url.clone())?)
-            .set_token_uri(TokenUrl::new(self.token_url.clone())?)
-            .set_redirect_uri(RedirectUrl::new(self.redirect_url.clone())?);
 
         // We use manual token exchange because FAPI 2.0 requires DPoP in headers,
         // which the oauth2 crate doesn't natively support yet for the exchange_code call.
