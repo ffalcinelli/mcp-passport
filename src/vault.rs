@@ -138,6 +138,22 @@ impl Vault {
             None => Ok(None),
         }
     }
+
+    /// Deletes the DPoP private key from the vault.
+    pub fn delete_dpop_key(&self, user_id: &str) -> Result<()> {
+        if self.use_memory {
+            let key = self.make_key(user_id, "dpop");
+            MEMORY_VAULT
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+            return Ok(());
+        }
+        let dpop_service = format!("{}-dpop", self.service);
+        let entry = Entry::new(&dpop_service, user_id)?;
+        let _ = entry.delete_credential();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +241,22 @@ mod tests {
         let none = vault.get_dpop_key("non_existent")?;
         assert_eq!(none, None);
 
+        // Delete
+        vault.delete_dpop_key(user)?;
+        let deleted = vault.get_dpop_key(user)?;
+        assert_eq!(deleted, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_nonexistent_dpop_key() -> Result<()> {
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::new("mcp-passport-test-nonexistent-dpop");
+
+        let res = vault.delete_dpop_key("non_existent_user");
+        assert!(res.is_ok());
+
         Ok(())
     }
 
@@ -264,6 +296,7 @@ mod tests {
         let _ = vault.delete_token("dummy_user_test");
         let _ = vault.store_dpop_key("dummy_user_test", b"dummy");
         let _ = vault.get_dpop_key("dummy_user_test");
+        let _ = vault.delete_dpop_key("dummy_user_test");
 
         // Restore env var
         if let Ok(val) = old_val {
