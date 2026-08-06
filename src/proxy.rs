@@ -296,12 +296,8 @@ impl Proxy {
                     derive_resource_url(&self.remote_url).ok()
                 });
 
-            self.trigger_reauth(
-                token_opt,
-                metadata_url.as_deref(),
-                challenge.scope,
-            )
-            .await?;
+            self.trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
+                .await?;
 
             return Ok(true);
         }
@@ -315,12 +311,8 @@ impl Proxy {
                     validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
                         .or_else(|| derive_resource_url(&self.remote_url).ok());
 
-                self.trigger_reauth(
-                    token_opt,
-                    metadata_url.as_deref(),
-                    challenge.scope,
-                )
-                .await?;
+                self.trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
+                    .await?;
                 return Ok(true);
             }
         }
