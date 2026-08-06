@@ -177,24 +177,24 @@ impl AuthManager {
         };
 
         // Fetch Protected Resource Metadata (RFC 9728)
-        let resource_name = if let Ok(mut res_url) = url::Url::parse(&resource) {
+        let fetched_resource_name: Option<String> = async {
+            let mut res_url = url::Url::parse(&resource).ok()?;
             res_url.set_path("/.well-known/oauth-protected-resource");
             res_url.set_query(None);
             res_url.set_fragment(None);
 
             info!("Fetching Protected Resource Metadata from {}...", res_url);
-            match http_client.get(res_url.as_str()).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<ResourceMetadata>().await {
-                        Ok(meta) => meta.resource_name.unwrap_or_else(|| resource.clone()),
-                        Err(_) => resource.clone(),
-                    }
-                }
-                _ => resource.clone(),
+            let resp = http_client.get(res_url.as_str()).send().await.ok()?;
+            if resp.status().is_success() {
+                let meta = resp.json::<ResourceMetadata>().await.ok()?;
+                meta.resource_name
+            } else {
+                None
             }
-        } else {
-            resource.clone()
-        };
+        }
+        .await;
+
+        let resource_name = fetched_resource_name.unwrap_or_else(|| resource.clone());
 
         let (success_html, failure_html) = if let Some(dir) = &oidc_config.template_dir {
             let (success_res, failure_res) = tokio::join!(
