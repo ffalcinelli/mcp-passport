@@ -8,8 +8,13 @@ import httpx
 import os
 import hashlib
 import base64
+import urllib.parse
 
 app = FastAPI()
+
+def sanitize_url_for_header(url: str) -> str:
+    """Sanitize URL to prevent HTTP header injection vulnerabilities."""
+    return urllib.parse.quote(str(url), safe=":/%#?=@[]!$&'()*+,;-._~")
 
 # Configuration
 KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://localhost:8080").rstrip("/")
@@ -70,7 +75,7 @@ async def verify_auth(request: Request, authorization: Optional[str] = Header(No
     if not authorization or not authorization.startswith("DPoP "):
         # Return 401 with resource_metadata fallback for unauthenticated requests
         headers = {
-            "WWW-Authenticate": f'DPoP resource_metadata="{request.base_url}.well-known/oauth-protected-resource"'
+            "WWW-Authenticate": f'DPoP resource_metadata="{sanitize_url_for_header(request.base_url)}.well-known/oauth-protected-resource"'
         }
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header. Expected DPoP bound token.", headers=headers)
     
@@ -106,7 +111,7 @@ async def verify_auth(request: Request, authorization: Optional[str] = Header(No
     except HTTPException as e:
         if e.status_code == 401:
             headers = {
-                "WWW-Authenticate": f'DPoP error="invalid_token", resource_metadata="{request.base_url}.well-known/oauth-protected-resource"'
+                "WWW-Authenticate": f'DPoP error="invalid_token", resource_metadata="{sanitize_url_for_header(request.base_url)}.well-known/oauth-protected-resource"'
             }
             raise HTTPException(status_code=401, detail=e.detail, headers=headers)
         raise e
