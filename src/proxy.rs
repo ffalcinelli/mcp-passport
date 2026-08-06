@@ -35,7 +35,7 @@ pub struct Proxy {
     /// OIDC configuration and metadata.
     oidc_config: OidcConfig,
     /// Shared authentication manager (lazy-loaded).
-    pub auth_manager: Arc<RwLock<Option<AuthManager>>>,
+    pub auth_manager: Arc<RwLock<Option<Arc<AuthManager>>>>,
     /// The MCP protocol version to use.
     protocol_version: String,
     /// The authentication scheme (Bearer or DPoP).
@@ -190,14 +190,14 @@ impl Proxy {
         {
             let lock = self.auth_manager.read().await;
             if let Some(am) = lock.as_ref() {
-                return Ok(Arc::new(am.clone()));
+                return Ok(am.clone());
             }
         }
 
         let mut lock = self.auth_manager.write().await;
         // Re-check after acquiring write lock
         if let Some(am) = lock.as_ref() {
-            return Ok(Arc::new(am.clone()));
+            return Ok(am.clone());
         }
 
         let discovery_url = metadata_url.or(self.oidc_config.discovery_url.as_deref());
@@ -216,7 +216,7 @@ impl Proxy {
         .await?;
 
         let am_shared = Arc::new(am);
-        *lock = Some((*am_shared).clone());
+        *lock = Some(am_shared.clone());
         Ok(am_shared)
     }
 
