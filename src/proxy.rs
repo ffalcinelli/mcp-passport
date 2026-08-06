@@ -220,6 +220,114 @@ impl Proxy {
         Ok(am_shared)
     }
 
+    async fn execute_request(
+        &self,
+        token_opt: Option<&String>,
+        dpop_key_opt: Option<&DpopKey>,
+        payload: &Value,
+    ) -> Result<Option<reqwest::Response>> {
+        if let Some(token) = token_opt {
+            let dpop_key = match dpop_key_opt {
+                Some(key) => key,
+                None => {
+                    info!("No DPoP key found for user, triggering re-authentication...");
+                    self.trigger_reauth(None, None, None).await?;
+                    return Ok(None);
+                }
+            };
+
+            let dpop_proof =
+                dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
+
+            let auth_header = match self.auth_scheme {
+                AuthScheme::Bearer => format!("Bearer {}", token),
+                AuthScheme::Dpop => format!("DPoP {}", token),
+            };
+
+            let mut request = self
+                .http_client
+                .post(&self.remote_url)
+                .header("Authorization", auth_header)
+                .header("DPoP", dpop_proof)
+                .header("MCP-Protocol-Version", &self.protocol_version);
+
+            {
+                let sid_lock = self.session_id.lock().await;
+                if let Some(s) = &*sid_lock {
+                    request = request.header("MCP-Session-Id", s);
+                }
+            }
+
+            Ok(Some(request.json(payload).send().await?))
+        } else {
+            // No token. Send unauthenticated request to trigger discovery via 401
+            info!(
+                "No token found for user, sending unauthenticated request to trigger discovery..."
+            );
+            let mut request = self
+                .http_client
+                .post(&self.remote_url)
+                .header("MCP-Protocol-Version", &self.protocol_version);
+
+            {
+                let sid_lock = self.session_id.lock().await;
+                if let Some(s) = &*sid_lock {
+                    request = request.header("MCP-Session-Id", s);
+                }
+            }
+
+            Ok(Some(request.json(payload).send().await?))
+        }
+    }
+
+    async fn handle_auth_challenge(
+        &self,
+        response: &reqwest::Response,
+        token_opt: Option<&str>,
+    ) -> Result<bool> {
+        if response.status() == StatusCode::UNAUTHORIZED {
+            warn!("401 Unauthorized received. Activating Airlock suspension...");
+            let challenge = WwwAuthenticate::parse(response.headers());
+
+            let metadata_url = validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
+                .or_else(|| {
+                    // Fallback to well-known at root if header is missing or SSRF check failed
+                    info!("WWW-Authenticate missing or invalid resource_metadata, falling back to root well-known...");
+                    derive_resource_url(&self.remote_url).ok()
+                });
+
+            self.trigger_reauth(
+                token_opt,
+                metadata_url.as_deref(),
+                challenge.scope,
+            )
+            .await?;
+
+            return Ok(true);
+        }
+
+        if response.status() == StatusCode::FORBIDDEN {
+            let challenge = WwwAuthenticate::parse(response.headers());
+            if challenge.error.as_deref() == Some("insufficient_scope") {
+                warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
+
+                let metadata_url =
+                    validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
+                        .or_else(|| derive_resource_url(&self.remote_url).ok());
+
+                self.trigger_reauth(
+                    token_opt,
+                    metadata_url.as_deref(),
+                    challenge.scope,
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Primary entry point for stdio -> HTTP bridge.
     /// It reads JSON-RPC payloads, attaches DPoP-bound tokens, and manages the Airlock.
     pub async fn handle_request(self: Arc<Self>, payload: Value) -> Result<Value> {
@@ -246,101 +354,23 @@ impl Proxy {
                 last_reauth_count = Some(current_reauth_count);
             }
 
-            let response = if let Some(ref token) = token_opt {
-                let dpop_key = match dpop_key_opt {
-                    Some(ref key) => key,
-                    None => {
-                        info!("No DPoP key found for user, triggering re-authentication...");
-                        self.trigger_reauth(None, None, None).await?;
-                        retry_count += 1;
-                        continue;
-                    }
-                };
-
-                let dpop_proof =
-                    dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
-
-                let auth_header = match self.auth_scheme {
-                    AuthScheme::Bearer => format!("Bearer {}", token),
-                    AuthScheme::Dpop => format!("DPoP {}", token),
-                };
-
-                let mut request = self
-                    .http_client
-                    .post(&self.remote_url)
-                    .header("Authorization", auth_header)
-                    .header("DPoP", dpop_proof)
-                    .header("MCP-Protocol-Version", &self.protocol_version);
-
-                {
-                    let sid_lock = self.session_id.lock().await;
-                    if let Some(s) = &*sid_lock {
-                        request = request.header("MCP-Session-Id", s);
-                    }
-                }
-
-                request.json(&payload).send().await?
-            } else {
-                // No token. Send unauthenticated request to trigger discovery via 401
-                info!(
-                    "No token found for user, sending unauthenticated request to trigger discovery..."
-                );
-                let mut request = self
-                    .http_client
-                    .post(&self.remote_url)
-                    .header("MCP-Protocol-Version", &self.protocol_version);
-
-                {
-                    let sid_lock = self.session_id.lock().await;
-                    if let Some(s) = &*sid_lock {
-                        request = request.header("MCP-Session-Id", s);
-                    }
-                }
-
-                request.json(&payload).send().await?
-            };
-
-            if response.status() == StatusCode::UNAUTHORIZED {
-                warn!("401 Unauthorized received. Activating Airlock suspension...");
-                let challenge = WwwAuthenticate::parse(response.headers());
-
-                let metadata_url = validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
-                    .or_else(|| {
-                        // Fallback to well-known at root if header is missing or SSRF check failed
-                        info!("WWW-Authenticate missing or invalid resource_metadata, falling back to root well-known...");
-                        derive_resource_url(&self.remote_url).ok()
-                    });
-
-                self.trigger_reauth(
-                    token_opt.as_deref(),
-                    metadata_url.as_deref(),
-                    challenge.scope,
-                )
-                .await?;
-
-                // Retry the request after re-authentication
-                retry_count += 1;
-                continue;
-            }
-
-            if response.status() == StatusCode::FORBIDDEN {
-                let challenge = WwwAuthenticate::parse(response.headers());
-                if challenge.error.as_deref() == Some("insufficient_scope") {
-                    warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
-
-                    let metadata_url =
-                        validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
-                            .or_else(|| derive_resource_url(&self.remote_url).ok());
-
-                    self.trigger_reauth(
-                        token_opt.as_deref(),
-                        metadata_url.as_deref(),
-                        challenge.scope,
-                    )
-                    .await?;
+            let response = match self
+                .execute_request(token_opt.as_ref(), dpop_key_opt.as_ref(), &payload)
+                .await?
+            {
+                Some(resp) => resp,
+                None => {
                     retry_count += 1;
                     continue;
                 }
+            };
+
+            if self
+                .handle_auth_challenge(&response, token_opt.as_deref())
+                .await?
+            {
+                retry_count += 1;
+                continue;
             }
 
             // Capture Session ID if returned
