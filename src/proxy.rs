@@ -132,11 +132,13 @@ fn validate_resource_metadata(metadata_url: Option<String>, remote_url: &str) ->
         }
     };
 
-    if m_url.host_str() != r_url.host_str() {
+    if m_url.host_str() != r_url.host_str() || m_url.port() != r_url.port() {
         warn!(
-            "SSRF Prevention: resource_metadata host ({:?}) does not match remote host ({:?}). Rejecting.",
+            "SSRF Prevention: resource_metadata host/port ({:?}:{:?}) does not match remote host/port ({:?}:{:?}). Rejecting.",
             m_url.host_str(),
-            r_url.host_str()
+            m_url.port(),
+            r_url.host_str(),
+            r_url.port()
         );
         return None;
     }
@@ -924,10 +926,15 @@ mod tests {
         );
         assert_eq!(valid, Some("http://localhost:8081/discovery".to_string()));
 
-        // Mismatch
-        let invalid =
-            validate_resource_metadata(Some("http://attacker.com/evil".to_string()), remote_url);
-        assert_eq!(invalid, None);
+        // Mismatch Host
+        let invalid_host =
+            validate_resource_metadata(Some("http://attacker.com:8081/evil".to_string()), remote_url);
+        assert_eq!(invalid_host, None);
+
+        // Mismatch Port
+        let invalid_port =
+            validate_resource_metadata(Some("http://localhost:8082/evil".to_string()), remote_url);
+        assert_eq!(invalid_port, None);
 
         // Missing
         let missing = validate_resource_metadata(None, remote_url);
