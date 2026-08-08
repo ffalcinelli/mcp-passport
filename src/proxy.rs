@@ -934,10 +934,8 @@ mod tests {
         assert_eq!(missing, None);
 
         // Invalid metadata URL (parsing fails)
-        let invalid_metadata_url = validate_resource_metadata(
-            Some("not_a_valid_url".to_string()),
-            remote_url,
-        );
+        let invalid_metadata_url =
+            validate_resource_metadata(Some("not_a_valid_url".to_string()), remote_url);
         assert_eq!(invalid_metadata_url, None);
 
         // Invalid remote URL (parsing fails)
@@ -959,7 +957,10 @@ mod tests {
             Some("http://localhost:8082/discovery".to_string()),
             remote_url,
         );
-        assert_eq!(different_port, Some("http://localhost:8082/discovery".to_string()));
+        assert_eq!(
+            different_port,
+            Some("http://localhost:8082/discovery".to_string())
+        );
     }
 
     #[test]
