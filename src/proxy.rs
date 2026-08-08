@@ -932,6 +932,34 @@ mod tests {
         // Missing
         let missing = validate_resource_metadata(None, remote_url);
         assert_eq!(missing, None);
+
+        // Invalid metadata URL (parsing fails)
+        let invalid_metadata_url = validate_resource_metadata(
+            Some("not_a_valid_url".to_string()),
+            remote_url,
+        );
+        assert_eq!(invalid_metadata_url, None);
+
+        // Invalid remote URL (parsing fails)
+        let invalid_remote_url = validate_resource_metadata(
+            Some("http://localhost:8081/discovery".to_string()),
+            "not_a_valid_url",
+        );
+        assert_eq!(invalid_remote_url, None);
+
+        // Subdomain mismatch
+        let subdomain_mismatch = validate_resource_metadata(
+            Some("http://test.localhost:8081/discovery".to_string()),
+            remote_url,
+        );
+        assert_eq!(subdomain_mismatch, None);
+
+        // Different ports, but hosts match
+        let different_port = validate_resource_metadata(
+            Some("http://localhost:8082/discovery".to_string()),
+            remote_url,
+        );
+        assert_eq!(different_port, Some("http://localhost:8082/discovery".to_string()));
     }
 
     #[test]
