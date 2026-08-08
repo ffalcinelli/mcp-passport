@@ -927,8 +927,10 @@ mod tests {
         assert_eq!(valid, Some("http://localhost:8081/discovery".to_string()));
 
         // Mismatch Host
-        let invalid_host =
-            validate_resource_metadata(Some("http://attacker.com:8081/evil".to_string()), remote_url);
+        let invalid_host = validate_resource_metadata(
+            Some("http://attacker.com:8081/evil".to_string()),
+            remote_url,
+        );
         assert_eq!(invalid_host, None);
 
         // Mismatch Port
