@@ -80,3 +80,6 @@ harness = false
 [[bench]]
 name = "resource_metadata_bench"
 harness = false
+[[bench]]
+name = "render_template_bench"
+harness = false
