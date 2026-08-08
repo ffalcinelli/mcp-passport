@@ -161,6 +161,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_make_key() {
+        let vault = Vault::new("my-service");
+
+        // Happy path
+        assert_eq!(vault.make_key("user123", "token"), "my-service:user123:token");
+
+        // Edge cases
+        assert_eq!(vault.make_key("", "token"), "my-service::token");
+        assert_eq!(vault.make_key("user123", ""), "my-service:user123:");
+        assert_eq!(vault.make_key("", ""), "my-service::");
+
+        // Special characters
+        assert_eq!(vault.make_key("user@domain.com", "dpop"), "my-service:user@domain.com:dpop");
+    }
+
+    #[test]
     fn test_vault_token_ops() -> Result<()> {
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
