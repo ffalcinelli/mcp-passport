@@ -165,7 +165,10 @@ mod tests {
         let vault = Vault::new("my-service");
 
         // Happy path
-        assert_eq!(vault.make_key("user123", "token"), "my-service:user123:token");
+        assert_eq!(
+            vault.make_key("user123", "token"),
+            "my-service:user123:token"
+        );
 
         // Edge cases
         assert_eq!(vault.make_key("", "token"), "my-service::token");
@@ -173,7 +176,10 @@ mod tests {
         assert_eq!(vault.make_key("", ""), "my-service::");
 
         // Special characters
-        assert_eq!(vault.make_key("user@domain.com", "dpop"), "my-service:user@domain.com:dpop");
+        assert_eq!(
+            vault.make_key("user@domain.com", "dpop"),
+            "my-service:user@domain.com:dpop"
+        );
     }
 
     #[test]
