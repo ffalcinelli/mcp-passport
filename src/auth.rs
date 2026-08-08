@@ -571,10 +571,6 @@ async fn handle_callback(
     }
 }
 
-fn escape_html(s: &str) -> String {
-    html_escape::encode_safe(s).to_string()
-}
-
 fn render_template(
     template: &str,
     error_message: Option<&str>,
@@ -595,16 +591,16 @@ fn render_template(
             match key {
                 "ERROR_MESSAGE" => {
                     if let Some(msg) = error_message {
-                        result.push_str(&escape_html(msg));
+                        result.push_str(&html_escape::encode_safe(msg));
                     } else {
                         result.push_str("{{ERROR_MESSAGE}}");
                     }
                 }
                 "ISSUER_NAME" => {
-                    result.push_str(&escape_html(issuer_name));
+                    result.push_str(&html_escape::encode_safe(issuer_name));
                 }
                 "RESOURCE_NAME" => {
-                    result.push_str(&escape_html(resource_name));
+                    result.push_str(&html_escape::encode_safe(resource_name));
                 }
                 _ => {
                     result.push_str("{{");
@@ -627,15 +623,15 @@ mod tests {
 
     #[test]
     fn test_escape_html() {
-        assert_eq!(escape_html("<script>"), "&lt;script&gt;");
-        assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(html_escape::encode_safe("<script>").to_string(), "&lt;script&gt;");
+        assert_eq!(html_escape::encode_safe("a & b").to_string(), "a &amp; b");
         assert_eq!(
-            escape_html("\"double quotes\""),
+            html_escape::encode_safe("\"double quotes\"").to_string(),
             "&quot;double quotes&quot;"
         );
-        assert_eq!(escape_html("'single quotes'"), "&#x27;single quotes&#x27;");
+        assert_eq!(html_escape::encode_safe("'single quotes'").to_string(), "&#x27;single quotes&#x27;");
         assert_eq!(
-            escape_html("<img src=x onerror=alert(1)>"),
+            html_escape::encode_safe("<img src=x onerror=alert(1)>").to_string(),
             "&lt;img src=x onerror=alert(1)&gt;"
         );
     }
