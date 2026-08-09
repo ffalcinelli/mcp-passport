@@ -688,6 +688,30 @@ mod tests {
     use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
 
     #[test]
+    fn test_derive_resource_url() {
+        // Test basic URL joining without trailing slash
+        assert_eq!(
+            derive_resource_url("http://example.com/api").unwrap(),
+            "http://example.com/.well-known/oauth-protected-resource"
+        );
+
+        // Test basic URL joining with trailing slash
+        assert_eq!(
+            derive_resource_url("http://example.com/api/").unwrap(),
+            "http://example.com/.well-known/oauth-protected-resource"
+        );
+
+        // Test root URL
+        assert_eq!(
+            derive_resource_url("http://example.com").unwrap(),
+            "http://example.com/.well-known/oauth-protected-resource"
+        );
+
+        // Test with invalid URL
+        assert!(derive_resource_url("not a url").is_err());
+    }
+
+    #[test]
     fn test_www_authenticate_parse_empty_headers() {
         let headers = HeaderMap::new();
         let auth = WwwAuthenticate::parse(&headers);
