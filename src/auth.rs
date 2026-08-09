@@ -581,43 +581,11 @@ fn render_template(
     issuer_name: &str,
     resource_name: &str,
 ) -> String {
-    let mut result = String::with_capacity(template.len());
-    let mut rest = template;
-
-    while let Some(start) = rest.find("{{") {
-        result.push_str(&rest[..start]);
-        rest = &rest[start + 2..];
-
-        if let Some(end) = rest.find("}}") {
-            let key = &rest[..end];
-            rest = &rest[end + 2..];
-
-            match key {
-                "ERROR_MESSAGE" => {
-                    if let Some(msg) = error_message {
-                        result.push_str(&escape_html(msg));
-                    } else {
-                        result.push_str("{{ERROR_MESSAGE}}");
-                    }
-                }
-                "ISSUER_NAME" => {
-                    result.push_str(&escape_html(issuer_name));
-                }
-                "RESOURCE_NAME" => {
-                    result.push_str(&escape_html(resource_name));
-                }
-                _ => {
-                    result.push_str("{{");
-                    result.push_str(key);
-                    result.push_str("}}");
-                }
-            }
-        } else {
-            result.push_str("{{");
-            break;
-        }
+    let mut result = template.replace("{{ISSUER_NAME}}", &escape_html(issuer_name));
+    result = result.replace("{{RESOURCE_NAME}}", &escape_html(resource_name));
+    if let Some(msg) = error_message {
+        result = result.replace("{{ERROR_MESSAGE}}", &escape_html(msg));
     }
-    result.push_str(rest);
     result
 }
 
