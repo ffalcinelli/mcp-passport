@@ -517,7 +517,8 @@ impl Proxy {
 
         match reauth_res {
             Ok(Ok(_)) => {
-                self.reauth_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.reauth_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 info!("Re-authentication successful. Deactivating Airlock...");
                 let _ = self.suspension_tx.send(false);
                 Ok(())
@@ -1244,7 +1245,9 @@ mod tests {
         {
             let mut lr = proxy.last_reauth.lock().await;
             *lr = Some(std::time::Instant::now());
-            proxy.reauth_count.store(1, std::sync::atomic::Ordering::Relaxed);
+            proxy
+                .reauth_count
+                .store(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // trigger_reauth should return Ok(()) and warn about fresh token rejected
