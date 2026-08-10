@@ -273,6 +273,47 @@ mod tests {
     }
 
     #[test]
+    fn test_vault_dpop_key_mutex_poisoned() -> Result<()> {
+        let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+
+        let vault = Vault::new("mcp-passport-test");
+        let user = "test_user_poison";
+
+        // Poison the mutex
+        let _ = std::panic::catch_unwind(|| {
+            let _lock = MEMORY_VAULT.lock().unwrap();
+            panic!("Intentional panic to poison mutex");
+        });
+
+        let res = vault.get_dpop_key(user);
+
+        // Capture the result so we can assert after cleanup
+        let is_err = res.is_err();
+        let err_msg = if is_err {
+            res.unwrap_err().to_string()
+        } else {
+            "".to_string()
+        };
+
+        // Clear the poison state so it doesn't affect other tests
+        MEMORY_VAULT.clear_poison();
+
+        // Restore env var
+        if let Ok(val) = old_val {
+            std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", val);
+        } else {
+            std::env::remove_var("MCP_PASSPORT_USE_MEMORY_VAULT");
+        }
+
+        // Now run the assertions safely
+        assert!(is_err);
+        assert!(err_msg.contains("Mutex poisoned"));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_vault_real_keyring_attempt() {
         // We don't set MCP_PASSPORT_USE_MEMORY_VAULT here
         let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
