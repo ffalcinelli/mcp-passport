@@ -12,6 +12,10 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+#[allow(dead_code)]
+static TEST_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
 // In-memory fallback for testing and headless environments where system keyring might be missing/unavailable
 static MEMORY_VAULT: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -184,6 +188,7 @@ mod tests {
 
     #[test]
     fn test_vault_token_ops() -> Result<()> {
+        let _test_lock = TEST_MUTEX.lock().unwrap();
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
         let vault = Vault::new("mcp-passport-test");
@@ -206,6 +211,7 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_token() -> Result<()> {
+        let _test_lock = TEST_MUTEX.lock().unwrap();
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let vault = Vault::new("mcp-passport-test-nonexistent");
 
@@ -217,6 +223,7 @@ mod tests {
 
     #[test]
     fn test_vault_dpop_ops() -> Result<()> {
+        let _test_lock = TEST_MUTEX.lock().unwrap();
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let vault = Vault::new("mcp-passport-test");
         let user = "test_user_dpop";
@@ -243,6 +250,7 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_dpop_key() -> Result<()> {
+        let _test_lock = TEST_MUTEX.lock().unwrap();
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let vault = Vault::new("mcp-passport-test-nonexistent-dpop");
 
@@ -254,6 +262,7 @@ mod tests {
 
     #[test]
     fn test_vault_dpop_hex_failure() -> Result<()> {
+        let _test_lock = TEST_MUTEX.lock().unwrap();
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let vault = Vault::new("mcp-passport-test");
         let user = "test_user_bad_hex";
@@ -273,7 +282,41 @@ mod tests {
     }
 
     #[test]
+    fn test_vault_dpop_key_mutex_poisoned() -> Result<()> {
+        let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
+        let _test_lock = TEST_MUTEX.lock().unwrap();
+        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+
+        let vault = Vault::new("mcp-passport-test");
+        let user = "test_user_poison";
+
+        let _ = std::panic::catch_unwind(|| {
+            let _lock = MEMORY_VAULT.lock().unwrap();
+            panic!("Intentional panic to poison mutex");
+        });
+
+        let res = vault.get_dpop_key(user);
+
+        MEMORY_VAULT.clear_poison();
+
+        let is_err = res.is_err();
+        let err_msg = res.map_err(|e| e.to_string()).err().unwrap_or_default();
+
+        if let Ok(val) = old_val {
+            std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", val);
+        } else {
+            std::env::remove_var("MCP_PASSPORT_USE_MEMORY_VAULT");
+        }
+
+        assert!(is_err);
+        assert!(err_msg.contains("Mutex poisoned"));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_vault_real_keyring_attempt() {
+        let _test_lock = TEST_MUTEX.lock().unwrap();
         // We don't set MCP_PASSPORT_USE_MEMORY_VAULT here
         let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
         std::env::remove_var("MCP_PASSPORT_USE_MEMORY_VAULT");
