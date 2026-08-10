@@ -80,3 +80,7 @@ harness = false
 [[bench]]
 name = "resource_metadata_bench"
 harness = false
+
+[[bench]]
+name = "reauth_count_bench"
+harness = false

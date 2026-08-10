@@ -47,7 +47,7 @@ pub struct Proxy {
     /// Timestamp of the last successful re-authentication.
     last_reauth: Mutex<Option<std::time::Instant>>,
     /// Counter for re-authentication attempts.
-    reauth_count: Arc<tokio::sync::RwLock<u64>>,
+    reauth_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Default)]
@@ -169,7 +169,7 @@ impl Proxy {
             session_id: Mutex::new(None),
             reauth_mutex: Mutex::new(()),
             last_reauth: Mutex::new(None),
-            reauth_count: Arc::new(tokio::sync::RwLock::new(0)),
+            reauth_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -337,7 +337,7 @@ impl Proxy {
             }
 
             self.wait_for_airlock().await?;
-            let current_reauth_count = { *self.reauth_count.read().await };
+            let current_reauth_count = self.reauth_count.load(std::sync::atomic::Ordering::Relaxed);
 
             if last_reauth_count != Some(current_reauth_count) {
                 let (new_token, new_dpop) = self.load_credentials()?;
@@ -393,13 +393,13 @@ impl Proxy {
         metadata_url: Option<&str>,
         scopes: Option<Vec<String>>,
     ) -> Result<()> {
-        let initial_count = { *self.reauth_count.read().await };
+        let initial_count = self.reauth_count.load(std::sync::atomic::Ordering::Relaxed);
         let _guard = self.reauth_mutex.lock().await;
 
         // Re-check if re-authentication is still needed after acquiring the lock.
         // If another task just finished re-authenticating, the token in the vault will be different or present.
         let current_token = self.vault.get_token(&self.user_id)?;
-        let current_count = { *self.reauth_count.read().await };
+        let current_count = self.reauth_count.load(std::sync::atomic::Ordering::Relaxed);
 
         debug!(
             "Re-auth redundant check: failing={:?}, current={:?}, count={}/{}, scopes={:?}",
@@ -517,10 +517,8 @@ impl Proxy {
 
         match reauth_res {
             Ok(Ok(_)) => {
-                {
-                    let mut count = self.reauth_count.write().await;
-                    *count += 1;
-                }
+                self.reauth_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 info!("Re-authentication successful. Deactivating Airlock...");
                 let _ = self.suspension_tx.send(false);
                 Ok(())
@@ -596,7 +594,7 @@ impl Proxy {
 
         loop {
             self.wait_for_airlock().await?;
-            let current_reauth_count = { *self.reauth_count.read().await };
+            let current_reauth_count = self.reauth_count.load(std::sync::atomic::Ordering::Relaxed);
 
             if last_reauth_count != Some(current_reauth_count) {
                 let (new_token, new_dpop) = self.load_credentials()?;
@@ -1300,8 +1298,9 @@ mod tests {
         {
             let mut lr = proxy.last_reauth.lock().await;
             *lr = Some(std::time::Instant::now());
-            let mut rc = proxy.reauth_count.write().await;
-            *rc = 1;
+            proxy
+                .reauth_count
+                .store(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // trigger_reauth should return Ok(()) and warn about fresh token rejected
