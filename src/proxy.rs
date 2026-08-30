@@ -132,11 +132,13 @@ fn validate_resource_metadata(metadata_url: Option<String>, remote_url: &str) ->
         }
     };
 
-    if m_url.host_str() != r_url.host_str() {
+    if m_url.host_str() != r_url.host_str() || m_url.port() != r_url.port() {
         warn!(
-            "SSRF Prevention: resource_metadata host ({:?}) does not match remote host ({:?}). Rejecting.",
+            "SSRF Prevention: resource_metadata host/port ({:?}:{:?}) does not match remote host/port ({:?}:{:?}). Rejecting.",
             m_url.host_str(),
-            r_url.host_str()
+            m_url.port(),
+            r_url.host_str(),
+            r_url.port()
         );
         return None;
     }
@@ -981,7 +983,7 @@ mod tests {
         );
         assert_eq!(
             different_port,
-            Some("http://localhost:8082/discovery".to_string())
+            None
         );
     }
 
