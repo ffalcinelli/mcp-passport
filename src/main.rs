@@ -8,7 +8,6 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
 
-
     // Ensure log directory exists with secure permissions (0700) atomically on Unix-like systems
     #[cfg(unix)]
     {

@@ -109,7 +109,6 @@ impl std::fmt::Debug for Config {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
