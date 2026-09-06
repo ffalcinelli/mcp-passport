@@ -8,6 +8,28 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
 
+
+    // Ensure log directory exists with secure permissions (0700) atomically on Unix-like systems
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if !std::path::Path::new(&config.log_dir).exists() {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            if let Err(e) = builder.create(&config.log_dir) {
+                eprintln!("Failed to create log directory securely: {}", e);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !std::path::Path::new(&config.log_dir).exists() {
+            if let Err(e) = std::fs::create_dir_all(&config.log_dir) {
+                eprintln!("Failed to create log directory: {}", e);
+            }
+        }
+    }
+
     // Setup file logging if requested
     let file_appender = tracing_appender::rolling::never(&config.log_dir, "mcp-passport.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
