@@ -7,7 +7,6 @@
 use crate::auth::{AuthManager, OidcConfig};
 use crate::config::AuthScheme;
 use crate::crypto::DpopKey;
-use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
 use rand::Rng;
@@ -1428,6 +1427,74 @@ mod tests {
         )
         .await;
         assert!(res.is_err()); // Timeout means it's still retrying
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod additional_tests {
+    use super::*;
+    use crate::OidcConfig;
+
+    #[tokio::test]
+    async fn test_check_reauth_required_fresh_token_rejected() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        // Pre-warm the last_reauth to trigger the < 5s logic
+        {
+            let mut last = proxy.last_reauth.lock().await;
+            *last = Some(std::time::Instant::now());
+        }
+
+        // Fresh token rejected: count > 0, current_token exists
+        let res = proxy
+            .check_reauth_required(None, Some("token"), None, 0, 1)
+            .await?;
+        assert_eq!(res, false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_clear_invalid_token_missing_to_present() -> Result<()> {
+        let proxy = Proxy::new(
+            "http://localhost:1/rpc",
+            "user",
+            OidcConfig {
+                discovery_url: None,
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                auth_url_override: None,
+                token_url_override: None,
+                par_url_override: None,
+                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+                template_dir: None,
+            },
+            "svc",
+            "v1",
+            AuthScheme::Bearer,
+        );
+
+        // token was missing initially, but is now present
+        let res = proxy.clear_invalid_token(None, Some("new_token"), None);
+        assert_eq!(res, false); // skips reauth
         Ok(())
     }
 }
