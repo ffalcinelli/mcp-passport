@@ -7,6 +7,7 @@
 use crate::auth::{AuthManager, OidcConfig};
 use crate::config::AuthScheme;
 use crate::crypto::DpopKey;
+use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
 use rand::Rng;
@@ -1434,7 +1435,6 @@ mod tests {
 #[cfg(test)]
 mod additional_tests {
     use super::*;
-    use crate::OidcConfig;
 
     #[tokio::test]
     async fn test_check_reauth_required_fresh_token_rejected() -> Result<()> {
@@ -1465,7 +1465,7 @@ mod additional_tests {
 
         // Fresh token rejected: count > 0, current_token exists
         let res = proxy
-            .check_reauth_required(None, Some("token"), None, 0, 1)
+            .check_reauth_required(None, Some("token"), None, 1, 1)
             .await?;
         assert_eq!(res, false);
         Ok(())
