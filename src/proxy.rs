@@ -981,10 +981,7 @@ mod tests {
             Some("http://localhost:8082/discovery".to_string()),
             remote_url,
         );
-        assert_eq!(
-            different_port,
-            None
-        );
+        assert_eq!(different_port, None);
     }
 
     #[test]

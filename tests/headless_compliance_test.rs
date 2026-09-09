@@ -21,13 +21,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{error, info};
 
-#[derive(Clone)]
-struct McpState {
-    metadata_url: String,
-}
-
 async fn mock_mcp_handler(
-    ax_extract::State(state): ax_extract::State<McpState>,
+    ax_extract::State(state): ax_extract::State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> (StatusCode, HeaderMap, Json<Value>) {
@@ -64,7 +59,8 @@ use std::collections::HashMap;
 use tokio::sync::Mutex as TokioMutex;
 
 #[derive(Clone)]
-struct OidcState {
+struct AppState {
+    metadata_url: String,
     sessions: Arc<TokioMutex<HashMap<String, String>>>,
     state_tx: Arc<TokioMutex<mpsc::Sender<String>>>,
 }
@@ -102,21 +98,22 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     let (state_tx, mut _state_rx) = mpsc::channel::<String>(1);
     let sessions = Arc::new(TokioMutex::new(HashMap::<String, String>::new()));
 
-    let oidc_state = OidcState {
+    // 2. Setup combined mock server (OIDC + MCP) on a single port to satisfy SSRF host/port validation
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+
+    let app_state = AppState {
+        metadata_url: format!("{}/discovery", base_url),
         sessions,
         state_tx: Arc::new(TokioMutex::new(state_tx)),
     };
 
-    let oidc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let oidc_addr = oidc_listener.local_addr()?;
-    let oidc_url = format!("http://127.0.0.1:{}", oidc_addr.port());
-    let oidc_url_for_mcp = oidc_url.clone();
-    let oidc_url_for_discovery = oidc_url.clone();
-
-    let oidc_app = Router::new()
-        .route("/discovery", get(move || {
-            let base = oidc_url_for_discovery.clone();
-            async move {
+    let app = Router::new()
+        .route("/discovery", get({
+            let base = base_url.clone();
+            move || async move {
                 Json(json!({
                     "issuer": base.clone(),
                     "organization_name": "Mock OIDC Provider",
@@ -126,7 +123,7 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
                 }))
             }
         }))
-        .route("/par", post(|ax_extract::State(state): ax_extract::State<OidcState>, Form(params): Form<Value>| async move {
+        .route("/par", post(|ax_extract::State(state): ax_extract::State<AppState>, Form(params): Form<Value>| async move {
             if params.get("resource").is_none() {
                 return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing_resource"})));
             }
@@ -137,7 +134,7 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
             }
             (StatusCode::OK, Json(json!({"request_uri": req_uri, "expires_in": 60})))
         }))
-        .route("/auth", get(|ax_extract::State(state): ax_extract::State<OidcState>, Query(params): Query<Value>| async move {
+        .route("/auth", get(|ax_extract::State(state): ax_extract::State<AppState>, Query(params): Query<Value>| async move {
             let req_uri = params.get("request_uri").and_then(|v| v.as_str()).unwrap_or("");
             let session_state = {
                 let lock = state.sessions.lock().await;
@@ -164,14 +161,6 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
             }
             (StatusCode::OK, Json(json!({"access_token": "valid_mock_token", "token_type": "DPoP", "expires_in": 3600})))
         }))
-        .with_state(oidc_state);
-
-    tokio::spawn(async move {
-        let _ = axum::serve(oidc_listener, oidc_app).await;
-    });
-
-    // 3. Setup Mock MCP Server
-    let mcp_app = Router::new()
         .route("/rpc", post(mock_mcp_handler))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -181,17 +170,13 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
                 }))
             }),
         )
-        .with_state(McpState {
-            metadata_url: format!("{}/discovery", oidc_url_for_mcp),
-        });
+        .with_state(app_state);
 
-    let mcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let mcp_addr = mcp_listener.local_addr()?;
-    let mcp_url = format!("http://127.0.0.1:{}/rpc", mcp_addr.port());
     tokio::spawn(async move {
-        let _ = axum::serve(mcp_listener, mcp_app).await;
+        let _ = axum::serve(listener, app).await;
     });
 
+    let mcp_url = format!("{}/rpc", base_url);
     // 4. Initialize OidcConfig with test channels
     let (url_tx, url_rx) = oneshot::channel::<String>();
     let oidc_config = OidcConfig {
