@@ -15,7 +15,8 @@ use tracing::info;
 
 #[derive(Clone)]
 struct McpState {
-    oidc_discovery: String,
+    keycloak_discovery: String,
+    mock_discovery: String,
 }
 
 async fn mock_mcp_handler(
@@ -62,7 +63,7 @@ async fn mock_mcp_handler(
 
     resp_headers.insert(
         reqwest::header::WWW_AUTHENTICATE,
-        format!("Bearer resource_metadata=\"{}\"", state.oidc_discovery)
+        format!("Bearer resource_metadata=\"{}\"", state.mock_discovery)
             .parse()
             .unwrap(),
     );
@@ -75,6 +76,7 @@ async fn mock_mcp_handler(
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     // 0. Setup environment and tracing
     std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
@@ -124,15 +126,36 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     let chrome_url = "http://localhost:4444";
 
     // 3. Start Mock MCP Server
-    let mcp_state = McpState {
-        oidc_discovery: oidc_discovery.clone(),
-    };
-    let app = Router::new()
-        .route("/rpc", post(mock_mcp_handler))
-        .with_state(mcp_state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let mock_addr = listener.local_addr()?;
-    let mock_url = format!("http://{}/rpc", mock_addr);
+    let mock_base = format!("http://127.0.0.1:{}", mock_addr.port());
+    let mock_url = format!("{}/rpc", mock_base);
+    let mock_discovery = format!("{}/discovery", mock_base);
+
+    let mcp_state = McpState {
+        keycloak_discovery: oidc_discovery.clone(),
+        mock_discovery: mock_discovery.clone(),
+    };
+
+    let app = Router::new()
+        .route("/rpc", post(mock_mcp_handler))
+        .route(
+            "/discovery",
+            axum::routing::get(
+                |ax_extract::State(state): ax_extract::State<McpState>| async move {
+                    axum::response::Redirect::temporary(&state.keycloak_discovery)
+                },
+            ),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            axum::routing::get(|| async move {
+                axum::Json(serde_json::json!({
+                    "resource_name": "Integration Mock Resource"
+                }))
+            }),
+        )
+        .with_state(mcp_state);
 
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;

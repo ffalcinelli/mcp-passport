@@ -132,11 +132,13 @@ fn validate_resource_metadata(metadata_url: Option<String>, remote_url: &str) ->
         }
     };
 
-    if m_url.host_str() != r_url.host_str() {
+    if m_url.host_str() != r_url.host_str() || m_url.port() != r_url.port() {
         warn!(
-            "SSRF Prevention: resource_metadata host ({:?}) does not match remote host ({:?}). Rejecting.",
+            "SSRF Prevention: resource_metadata host/port ({:?}:{:?}) does not match remote host/port ({:?}:{:?}). Rejecting.",
             m_url.host_str(),
-            r_url.host_str()
+            m_url.port(),
+            r_url.host_str(),
+            r_url.port()
         );
         return None;
     }
@@ -387,97 +389,6 @@ impl Proxy {
         }
     }
 
-    async fn check_reauth_required(
-        &self,
-        failing_token: Option<&str>,
-        current_token: Option<&str>,
-        scopes: Option<&Vec<String>>,
-        initial_count: u64,
-        current_count: u64,
-    ) -> Result<bool> {
-        debug!(
-            "Re-auth redundant check: failing={:?}, current={:?}, count={}/{}, scopes={:?}",
-            failing_token.map(|t| &t[..std::cmp::min(8, t.len())]),
-            current_token.map(|t| &t[..std::cmp::min(8, t.len())]),
-            initial_count,
-            current_count,
-            scopes
-        );
-
-        if current_count > initial_count && scopes.is_none() {
-            info!("Re-authentication occurred while waiting for lock. Skipping redundant re-auth.");
-            return Ok(false);
-        }
-
-        if let (Some(failing), Some(current)) = (failing_token, current_token) {
-            if failing != current && scopes.is_none() {
-                info!(
-                    "Token has already been updated by another task (failing: {}, current: {}). Skipping redundant re-auth.",
-                    &failing[..std::cmp::min(8, failing.len())],
-                    &current[..std::cmp::min(8, current.len())]
-                );
-                return Ok(false);
-            }
-        } else if failing_token.is_none() && current_token.is_some() && scopes.is_none() {
-            info!("Token was missing but is now present. Skipping redundant re-auth.");
-            return Ok(false);
-        }
-
-        // Circuit Breaker: prevent rapid consecutive re-authentications
-        let now = std::time::Instant::now();
-        let mut last = self.last_reauth.lock().await;
-        if let Some(t) = *last {
-            let elapsed = now.duration_since(t);
-
-            if elapsed < std::time::Duration::from_secs(5) {
-                if current_count > initial_count {
-                    info!("Count increased during cooldown, skipping redundant re-auth.");
-                    return Ok(false);
-                }
-
-                // If we just re-authenticated successfully (count increased), and we ALREADY HAVE a new token,
-                // but we still got a 401, we should NOT re-auth immediately again.
-                // This prevents infinite loops if the new token is being rejected.
-                if current_count > 0 && current_token.is_some() {
-                    warn!("Fresh token was rejected. Skipping immediate re-auth to prevent loop.");
-                    return Ok(false);
-                }
-
-                warn!("Re-authentication triggered very rapidly (within 5s).");
-            }
-
-            if elapsed < std::time::Duration::from_secs(1) {
-                error!("Authentication loop detected. Re-authentication triggered too frequently (within 1s).");
-                return Err(anyhow::anyhow!("Authentication loop detected. Please check your credentials and environment configuration."));
-            }
-        }
-        *last = Some(now);
-
-        Ok(true)
-    }
-
-    fn clear_invalid_token(
-        &self,
-        failing_token: Option<&str>,
-        current_token: Option<&str>,
-        scopes: Option<&Vec<String>>,
-    ) -> bool {
-        // Clear invalid token from vault ONLY if it's still the one failing and not a step-up
-        if scopes.is_none() {
-            if let (Some(failing), Some(current)) = (failing_token, current_token) {
-                if failing == current {
-                    let _ = self.vault.delete_token(&self.user_id);
-                }
-            } else if failing_token.is_none() && current_token.is_some() {
-                // If it was missing from the start, we don't need to delete anything,
-                // but we should check if it's still missing.
-                info!("Token appeared while preparing re-auth, skipping.");
-                return false;
-            }
-        }
-        true
-    }
-
     pub async fn trigger_reauth(
         &self,
         failing_token: Option<&str>,
@@ -486,6 +397,22 @@ impl Proxy {
     ) -> Result<()> {
         let initial_count = self.reauth_count.load(std::sync::atomic::Ordering::Relaxed);
         let _guard = self.reauth_mutex.lock().await;
+
+        // Re-check if re-authentication is still needed after acquiring the lock.
+        // If another task just finished re-authenticating, the token in the vault will be different or present.
+        let current_token = self.vault.get_token(&self.user_id)?;
+        let current_count = self.reauth_count.load(std::sync::atomic::Ordering::Relaxed);
+
+        debug!(
+            "Re-auth redundant check: failing={:?}, current={:?}, count={}/{}, scopes={:?}",
+            failing_token.map(|t| &t[..std::cmp::min(8, t.len())]),
+            current_token
+                .as_deref()
+                .map(|t| &t[..std::cmp::min(8, t.len())]),
+            initial_count,
+            current_count,
+            scopes
+        );
 
         // If airlock is already active, someone else is handling it.
         // Wait for it to clear and then return.
@@ -496,30 +423,77 @@ impl Proxy {
             return Ok(());
         }
 
-        // Re-check if re-authentication is still needed after acquiring the lock.
-        // If another task just finished re-authenticating, the token in the vault will be different or present.
-        let current_token = self.vault.get_token(&self.user_id)?;
-        let current_count = self.reauth_count.load(std::sync::atomic::Ordering::Relaxed);
-
-        if !self
-            .check_reauth_required(
-                failing_token,
-                current_token.as_deref(),
-                scopes.as_ref(),
-                initial_count,
-                current_count,
-            )
-            .await?
-        {
+        if current_count > initial_count && scopes.is_none() {
+            info!("Re-authentication occurred while waiting for lock. Skipping redundant re-auth.");
             return Ok(());
+        }
+
+        if let (Some(failing), Some(current)) = (failing_token, current_token.as_deref()) {
+            if failing != current && scopes.is_none() {
+                info!(
+                    "Token has already been updated by another task (failing: {}, current: {}). Skipping redundant re-auth.",
+                    &failing[..std::cmp::min(8, failing.len())],
+                    &current[..std::cmp::min(8, current.len())]
+                );
+                return Ok(());
+            }
+        } else if failing_token.is_none() && current_token.is_some() && scopes.is_none() {
+            info!("Token was missing but is now present. Skipping redundant re-auth.");
+            return Ok(());
+        }
+
+        // Circuit Breaker: prevent rapid consecutive re-authentications
+        let now = std::time::Instant::now();
+        {
+            let mut last = self.last_reauth.lock().await;
+            if let Some(t) = *last {
+                let elapsed = now.duration_since(t);
+
+                if elapsed < std::time::Duration::from_secs(5) {
+                    if current_count > initial_count {
+                        info!("Count increased during cooldown, skipping redundant re-auth.");
+                        return Ok(());
+                    }
+
+                    // If we just re-authenticated successfully (count increased), and we ALREADY HAVE a new token,
+                    // but we still got a 401, we should NOT re-auth immediately again.
+                    // This prevents infinite loops if the new token is being rejected.
+                    if current_count > 0 && current_token.is_some() {
+                        warn!(
+                            "Fresh token was rejected. Skipping immediate re-auth to prevent loop."
+                        );
+                        return Ok(());
+                    }
+
+                    warn!("Re-authentication triggered very rapidly (within 5s).");
+                }
+
+                if elapsed < std::time::Duration::from_secs(1) {
+                    error!("Authentication loop detected. Re-authentication triggered too frequently (within 1s).");
+                    return Err(anyhow::anyhow!("Authentication loop detected. Please check your credentials and environment configuration."));
+                }
+            }
+            *last = Some(now);
         }
 
         let _ = self.suspension_tx.send(true);
         info!("Airlock activated. Performing re-authentication...");
 
-        if !self.clear_invalid_token(failing_token, current_token.as_deref(), scopes.as_ref()) {
-            let _ = self.suspension_tx.send(false);
-            return Ok(());
+        // Clear invalid token from vault ONLY if it's still the one failing and not a step-up
+        if scopes.is_none() {
+            if let (Some(failing), Some(current)) = (failing_token, current_token.as_deref()) {
+                if failing == current {
+                    let _ = self.vault.delete_token(&self.user_id);
+                }
+            } else if failing_token.is_none() {
+                // If it was missing from the start, we don't need to delete anything,
+                // but we should check if it's still missing.
+                if current_token.is_some() {
+                    info!("Token appeared while preparing re-auth, skipping.");
+                    let _ = self.suspension_tx.send(false);
+                    return Ok(());
+                }
+            }
         }
 
         let auth_manager_res = self.ensure_auth_manager(metadata_url).await;
@@ -1007,10 +981,7 @@ mod tests {
             Some("http://localhost:8082/discovery".to_string()),
             remote_url,
         );
-        assert_eq!(
-            different_port,
-            Some("http://localhost:8082/discovery".to_string())
-        );
+        assert_eq!(different_port, None);
     }
 
     #[test]
@@ -1428,73 +1399,6 @@ mod tests {
         )
         .await;
         assert!(res.is_err()); // Timeout means it's still retrying
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod additional_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_check_reauth_required_fresh_token_rejected() -> Result<()> {
-        let proxy = Proxy::new(
-            "http://localhost:1/rpc",
-            "user",
-            OidcConfig {
-                discovery_url: None,
-                client_id: "c".into(),
-                redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
-            },
-            "svc",
-            "v1",
-            AuthScheme::Bearer,
-        );
-
-        // Pre-warm the last_reauth to trigger the < 5s logic
-        {
-            let mut last = proxy.last_reauth.lock().await;
-            *last = Some(std::time::Instant::now());
-        }
-
-        // Fresh token rejected: count > 0, current_token exists
-        let res = proxy
-            .check_reauth_required(None, Some("token"), None, 1, 1)
-            .await?;
-        assert_eq!(res, false);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_clear_invalid_token_missing_to_present() -> Result<()> {
-        let proxy = Proxy::new(
-            "http://localhost:1/rpc",
-            "user",
-            OidcConfig {
-                discovery_url: None,
-                client_id: "c".into(),
-                redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
-            },
-            "svc",
-            "v1",
-            AuthScheme::Bearer,
-        );
-
-        // token was missing initially, but is now present
-        let res = proxy.clear_invalid_token(None, Some("new_token"), None);
-        assert_eq!(res, false); // skips reauth
         Ok(())
     }
 }

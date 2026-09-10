@@ -7,7 +7,7 @@ pub enum AuthScheme {
     Dpop,
 }
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Config {
     /// Remote MCP server JSON-RPC endpoint
@@ -86,26 +86,6 @@ pub struct Config {
 impl Config {
     pub fn parse() -> Self {
         Parser::parse()
-    }
-}
-impl std::fmt::Debug for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
-            .field("remote_mcp_url", &self.remote_mcp_url)
-            .field("remote_sse_url", &self.remote_sse_url)
-            .field("oidc_discovery_url", &self.oidc_discovery_url)
-            .field("kc_auth_url", &self.kc_auth_url)
-            .field("kc_token_url", &self.kc_token_url)
-            .field("kc_par_url", &self.kc_par_url)
-            .field("oidc_client_id", &"***")
-            .field("oidc_redirect_url", &self.oidc_redirect_url)
-            .field("user_id", &"***")
-            .field("log_level", &self.log_level)
-            .field("mcp_protocol_version", &self.mcp_protocol_version)
-            .field("auth_scheme", &self.auth_scheme)
-            .field("log_dir", &self.log_dir)
-            .field("template_dir", &self.template_dir)
-            .finish()
     }
 }
 
