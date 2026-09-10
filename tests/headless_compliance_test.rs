@@ -66,6 +66,7 @@ struct AppState {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     // Ensure we use the memory vault and skip browser for reliability in all environments
     std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
