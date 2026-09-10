@@ -103,7 +103,6 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
     let base_url = format!("http://127.0.0.1:{}", addr.port());
 
-
     let app_state = AppState {
         metadata_url: format!("{}/discovery", base_url),
         sessions,
