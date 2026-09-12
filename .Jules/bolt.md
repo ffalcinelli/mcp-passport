@@ -1,0 +1,3 @@
+## 2024-08-30 - AuthServerState Clone Performance Optimization
+**Learning:** `AuthServerState` was being cloned by `axum` on *every single incoming request* during the loopback callback flow. Since it contained `String` fields for `issuer_name` and `resource_name` (as well as templates), each request incurred unnecessary heap allocations, as demonstrated by the `auth_state_bench`.
+**Action:** Changed the string fields in shared axum `State` structs (like `AuthServerState`) to be wrapped in `Arc<String>`. By doing this, we avoid deep string copying and instead only increment an atomic reference counter per request, vastly reducing overhead during high-concurrency or rapid authentication flows.
