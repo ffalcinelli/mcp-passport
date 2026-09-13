@@ -941,15 +941,11 @@ mod tests {
         let remote_url = "http://localhost:8081/rpc";
 
         // Match
-        let valid = validate_resource_metadata(
-            Some("http://localhost:8081/discovery"),
-            remote_url,
-        );
+        let valid = validate_resource_metadata(Some("http://localhost:8081/discovery"), remote_url);
         assert_eq!(valid, Some("http://localhost:8081/discovery".to_string()));
 
         // Mismatch
-        let invalid =
-            validate_resource_metadata(Some("http://attacker.com/evil"), remote_url);
+        let invalid = validate_resource_metadata(Some("http://attacker.com/evil"), remote_url);
         assert_eq!(invalid, None);
 
         // Missing
@@ -957,29 +953,22 @@ mod tests {
         assert_eq!(missing, None);
 
         // Invalid metadata URL (parsing fails)
-        let invalid_metadata_url =
-            validate_resource_metadata(Some("not_a_valid_url"), remote_url);
+        let invalid_metadata_url = validate_resource_metadata(Some("not_a_valid_url"), remote_url);
         assert_eq!(invalid_metadata_url, None);
 
         // Invalid remote URL (parsing fails)
-        let invalid_remote_url = validate_resource_metadata(
-            Some("http://localhost:8081/discovery"),
-            "not_a_valid_url",
-        );
+        let invalid_remote_url =
+            validate_resource_metadata(Some("http://localhost:8081/discovery"), "not_a_valid_url");
         assert_eq!(invalid_remote_url, None);
 
         // Subdomain mismatch
-        let subdomain_mismatch = validate_resource_metadata(
-            Some("http://test.localhost:8081/discovery"),
-            remote_url,
-        );
+        let subdomain_mismatch =
+            validate_resource_metadata(Some("http://test.localhost:8081/discovery"), remote_url);
         assert_eq!(subdomain_mismatch, None);
 
         // Different ports, but hosts match
-        let different_port = validate_resource_metadata(
-            Some("http://localhost:8082/discovery"),
-            remote_url,
-        );
+        let different_port =
+            validate_resource_metadata(Some("http://localhost:8082/discovery"), remote_url);
         assert_eq!(different_port, None);
     }
 
