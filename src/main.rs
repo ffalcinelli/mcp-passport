@@ -9,6 +9,27 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
 
     // Setup file logging if requested
+    #[cfg(unix)]
+    {
+        use std::fs::DirBuilder;
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = DirBuilder::new();
+        builder.recursive(true);
+        // Set secure permissions (0o700) on the log directory during creation to prevent unauthorized local access to trace contexts
+        builder.mode(0o700);
+        if let Err(e) = builder.create(&config.log_dir) {
+            eprintln!("Failed to create secure log directory: {}", e);
+            std::process::exit(1);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(e) = std::fs::create_dir_all(&config.log_dir) {
+            eprintln!("Failed to create log directory: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     let file_appender = tracing_appender::rolling::never(&config.log_dir, "mcp-passport.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
