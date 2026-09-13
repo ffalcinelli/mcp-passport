@@ -51,14 +51,14 @@ pub struct Proxy {
 }
 
 #[derive(Debug, Default)]
-struct WwwAuthenticate {
-    resource_metadata: Option<String>,
-    scope: Option<Vec<String>>,
-    error: Option<String>,
+struct WwwAuthenticate<'a> {
+    resource_metadata: Option<&'a str>,
+    scope: Option<Vec<&'a str>>,
+    error: Option<&'a str>,
 }
 
-impl WwwAuthenticate {
-    fn parse(headers: &HeaderMap) -> Self {
+impl<'a> WwwAuthenticate<'a> {
+    fn parse(headers: &'a HeaderMap) -> Self {
         let mut result = Self::default();
         if let Some(auth_val) = headers
             .get(reqwest::header::WWW_AUTHENTICATE)
@@ -71,7 +71,7 @@ impl WwwAuthenticate {
                 result.resource_metadata = Some(rm);
             }
             if let Some(sc) = extract_param(auth_val, "scope") {
-                result.scope = Some(sc.split_whitespace().map(|s| s.to_string()).collect());
+                result.scope = Some(sc.split_whitespace().collect());
             }
             if let Some(err) = extract_param(auth_val, "error") {
                 result.error = Some(err);
@@ -81,7 +81,7 @@ impl WwwAuthenticate {
     }
 }
 
-fn extract_param(header: &str, param: &str) -> Option<String> {
+fn extract_param<'a>(header: &'a str, param: &str) -> Option<&'a str> {
     if param.is_empty() {
         return None;
     }
@@ -92,12 +92,12 @@ fn extract_param(header: &str, param: &str) -> Option<String> {
         if let Some(remainder) = after_param.strip_prefix('=') {
             if let Some(stripped) = remainder.strip_prefix('"') {
                 if let Some(end) = stripped.find('"') {
-                    return Some(stripped[..end].to_string());
+                    return Some(&stripped[..end]);
                 }
             } else {
                 // Unquoted: take until comma or end of string
                 let end = remainder.find(',').unwrap_or(remainder.len());
-                return Some(remainder[..end].trim().to_string());
+                return Some(remainder[..end].trim());
             }
         }
         start = absolute_pos + param.len();
@@ -113,10 +113,10 @@ fn derive_resource_url(remote_url: &str) -> Result<String> {
     Ok(joined.to_string())
 }
 
-fn validate_resource_metadata(metadata_url: Option<String>, remote_url: &str) -> Option<String> {
+fn validate_resource_metadata(metadata_url: Option<&str>, remote_url: &str) -> Option<String> {
     let url_str = metadata_url?;
 
-    let m_url = match Url::parse(&url_str) {
+    let m_url = match Url::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
             warn!("Failed to parse resource_metadata URL ({}): {}", url_str, e);
@@ -143,7 +143,7 @@ fn validate_resource_metadata(metadata_url: Option<String>, remote_url: &str) ->
         return None;
     }
 
-    Some(url_str)
+    Some(url_str.to_string())
 }
 
 impl Proxy {
@@ -298,7 +298,10 @@ impl Proxy {
                     derive_resource_url(&self.remote_url).ok()
                 });
 
-            self.trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
+            let scopes = challenge
+                .scope
+                .map(|v| v.into_iter().map(|s| s.to_string()).collect());
+            self.trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
                 .await?;
 
             return Ok(true);
@@ -306,14 +309,17 @@ impl Proxy {
 
         if response.status() == StatusCode::FORBIDDEN {
             let challenge = WwwAuthenticate::parse(response.headers());
-            if challenge.error.as_deref() == Some("insufficient_scope") {
+            if challenge.error == Some("insufficient_scope") {
                 warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
 
                 let metadata_url =
                     validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
                         .or_else(|| derive_resource_url(&self.remote_url).ok());
 
-                self.trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
+                let scopes = challenge
+                    .scope
+                    .map(|v| v.into_iter().map(|s| s.to_string()).collect());
+                self.trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
                     .await?;
                 return Ok(true);
             }
@@ -571,8 +577,11 @@ impl Proxy {
             validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
                 .or_else(|| derive_resource_url(&self.remote_url).ok());
 
+        let scopes = challenge
+            .scope
+            .map(|v| v.into_iter().map(|s| s.to_string()).collect());
         if let Err(e) = self
-            .trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope)
+            .trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
             .await
         {
             error!(
@@ -792,9 +801,9 @@ mod tests {
         let challenge = WwwAuthenticate::parse(&headers);
         assert_eq!(
             challenge.resource_metadata,
-            Some("http://example.com/.well-known/oauth-protected-resource".to_string())
+            Some("http://example.com/.well-known/oauth-protected-resource")
         );
-        assert_eq!(challenge.scope, Some(vec!["mcp:all".to_string()]));
+        assert_eq!(challenge.scope, Some(vec!["mcp:all"]));
     }
 
     #[test]
@@ -809,9 +818,9 @@ mod tests {
         let challenge = WwwAuthenticate::parse(&headers);
         assert_eq!(
             challenge.resource_metadata,
-            Some("http://example.com/.well-known/oauth-protected-resource".to_string())
+            Some("http://example.com/.well-known/oauth-protected-resource")
         );
-        assert_eq!(challenge.scope, Some(vec!["mcp:all".to_string()]));
+        assert_eq!(challenge.scope, Some(vec!["mcp:all"]));
     }
 
     #[test]
@@ -824,11 +833,11 @@ mod tests {
             ),
         );
         let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.error, Some("insufficient_scope".to_string()));
-        assert_eq!(challenge.scope, Some(vec!["admin".to_string()]));
+        assert_eq!(challenge.error, Some("insufficient_scope"));
+        assert_eq!(challenge.scope, Some(vec!["admin"]));
         assert_eq!(
             challenge.resource_metadata,
-            Some("http://localhost/discovery".to_string())
+            Some("http://localhost/discovery")
         );
     }
 
@@ -840,14 +849,7 @@ mod tests {
             HeaderValue::from_static("Bearer scope=\"read write admin\""),
         );
         let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(
-            challenge.scope,
-            Some(vec![
-                "read".to_string(),
-                "write".to_string(),
-                "admin".to_string()
-            ])
-        );
+        assert_eq!(challenge.scope, Some(vec!["read", "write", "admin"]));
     }
 
     #[test]
@@ -858,8 +860,8 @@ mod tests {
             HeaderValue::from_static("Bearer error=invalid_token, scope=mcp:all"),
         );
         let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.error, Some("invalid_token".to_string()));
-        assert_eq!(challenge.scope, Some(vec!["mcp:all".to_string()]));
+        assert_eq!(challenge.error, Some("invalid_token"));
+        assert_eq!(challenge.scope, Some(vec!["mcp:all"]));
     }
 
     #[test]
@@ -892,10 +894,7 @@ mod tests {
             HeaderValue::from_static("Bearer scope=\"read   write\""),
         );
         let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(
-            challenge.scope,
-            Some(vec!["read".to_string(), "write".to_string()])
-        );
+        assert_eq!(challenge.scope, Some(vec!["read", "write"]));
     }
 
     #[test]
@@ -906,7 +905,7 @@ mod tests {
             HeaderValue::from_static("Bearer myscope=\"admin\""),
         );
         let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.scope, Some(vec!["admin".to_string()]));
+        assert_eq!(challenge.scope, Some(vec!["admin"]));
     }
 
     #[test]
@@ -943,14 +942,14 @@ mod tests {
 
         // Match
         let valid = validate_resource_metadata(
-            Some("http://localhost:8081/discovery".to_string()),
+            Some("http://localhost:8081/discovery"),
             remote_url,
         );
         assert_eq!(valid, Some("http://localhost:8081/discovery".to_string()));
 
         // Mismatch
         let invalid =
-            validate_resource_metadata(Some("http://attacker.com/evil".to_string()), remote_url);
+            validate_resource_metadata(Some("http://attacker.com/evil"), remote_url);
         assert_eq!(invalid, None);
 
         // Missing
@@ -959,26 +958,26 @@ mod tests {
 
         // Invalid metadata URL (parsing fails)
         let invalid_metadata_url =
-            validate_resource_metadata(Some("not_a_valid_url".to_string()), remote_url);
+            validate_resource_metadata(Some("not_a_valid_url"), remote_url);
         assert_eq!(invalid_metadata_url, None);
 
         // Invalid remote URL (parsing fails)
         let invalid_remote_url = validate_resource_metadata(
-            Some("http://localhost:8081/discovery".to_string()),
+            Some("http://localhost:8081/discovery"),
             "not_a_valid_url",
         );
         assert_eq!(invalid_remote_url, None);
 
         // Subdomain mismatch
         let subdomain_mismatch = validate_resource_metadata(
-            Some("http://test.localhost:8081/discovery".to_string()),
+            Some("http://test.localhost:8081/discovery"),
             remote_url,
         );
         assert_eq!(subdomain_mismatch, None);
 
         // Different ports, but hosts match
         let different_port = validate_resource_metadata(
-            Some("http://localhost:8082/discovery".to_string()),
+            Some("http://localhost:8082/discovery"),
             remote_url,
         );
         assert_eq!(different_port, None);
@@ -987,20 +986,20 @@ mod tests {
     #[test]
     fn test_extract_param_quoted_with_comma() {
         let val = "Bearer scope=\"a,b,c\", error=\"err\"";
-        assert_eq!(extract_param(val, "scope"), Some("a,b,c".to_string()));
-        assert_eq!(extract_param(val, "error"), Some("err".to_string()));
+        assert_eq!(extract_param(val, "scope"), Some("a,b,c"));
+        assert_eq!(extract_param(val, "error"), Some("err"));
     }
 
     #[test]
     fn test_extract_param_unquoted_with_comma() {
         let val = "Bearer scope=a,b,c, error=err";
-        assert_eq!(extract_param(val, "scope"), Some("a".to_string())); // Stops at first comma
+        assert_eq!(extract_param(val, "scope"), Some("a")); // Stops at first comma
     }
 
     #[test]
     fn test_extract_param_unquoted_at_end() {
         let val = "Bearer foo=bar";
-        assert_eq!(extract_param(val, "foo"), Some("bar".to_string()));
+        assert_eq!(extract_param(val, "foo"), Some("bar"));
     }
 
     #[tokio::test]
