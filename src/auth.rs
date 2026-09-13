@@ -19,6 +19,7 @@ use axum::{
     routing::get,
     Router,
 };
+use colored::Colorize;
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, TokenUrl,
@@ -430,10 +431,21 @@ impl AuthManager {
             self.auth_url, self.client_id, par_data.request_uri
         );
 
-        warn!("****************************************************************");
-        warn!("ACTION REQUIRED: Please visit the following URL to authenticate:");
-        warn!("{}", auth_url);
-        warn!("****************************************************************");
+        eprintln!(
+            "{}",
+            "****************************************************************".yellow()
+        );
+        eprintln!(
+            "{}",
+            "🔐 ACTION REQUIRED: Please visit the following URL to authenticate:"
+                .bold()
+                .yellow()
+        );
+        eprintln!("{}", auth_url.bold().cyan());
+        eprintln!(
+            "{}",
+            "****************************************************************".yellow()
+        );
 
         // Attempt to open the browser automatically (skip if in tests or explicitly requested)
         let skip_open = std::env::var("MCP_PASSPORT_SKIP_OPEN_BROWSER").is_ok();
