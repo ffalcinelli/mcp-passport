@@ -11,23 +11,43 @@ pub enum AuthScheme {
 #[command(author, version, about = "Secure 1:1 transparent Layer 7 proxy for the Model Context Protocol (MCP)", long_about = None)]
 pub struct Config {
     /// Remote MCP server JSON-RPC endpoint
-    #[arg(long, env = "MCP_PASSPORT_REMOTE_MCP_URL", help_heading = "Remote Server")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_REMOTE_MCP_URL",
+        help_heading = "Remote Server"
+    )]
     pub remote_mcp_url: String,
 
     /// Remote MCP server SSE endpoint
-    #[arg(long, env = "MCP_PASSPORT_REMOTE_SSE_URL", help_heading = "Remote Server")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_REMOTE_SSE_URL",
+        help_heading = "Remote Server"
+    )]
     pub remote_sse_url: String,
 
     /// OIDC Discovery URL
-    #[arg(long, env = "MCP_PASSPORT_OIDC_DISCOVERY_URL", help_heading = "OIDC Configuration")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_DISCOVERY_URL",
+        help_heading = "OIDC Configuration"
+    )]
     pub oidc_discovery_url: Option<String>,
 
     /// Keycloak OIDC Authorization URL (Override if not using discovery)
-    #[arg(long, env = "MCP_PASSPORT_KC_AUTH_URL", help_heading = "OIDC Overrides")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_KC_AUTH_URL",
+        help_heading = "OIDC Overrides"
+    )]
     pub kc_auth_url: Option<String>,
 
     /// Keycloak OIDC Token URL (Override if not using discovery)
-    #[arg(long, env = "MCP_PASSPORT_KC_TOKEN_URL", help_heading = "OIDC Overrides")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_KC_TOKEN_URL",
+        help_heading = "OIDC Overrides"
+    )]
     pub kc_token_url: Option<String>,
 
     /// Keycloak OIDC Pushed Authorization Request (PAR) URL (Override if not using discovery)
@@ -38,7 +58,8 @@ pub struct Config {
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_CLIENT_ID",
-        default_value = "mcp-passport", help_heading = "OIDC Configuration"
+        default_value = "mcp-passport",
+        help_heading = "OIDC Configuration"
     )]
     pub oidc_client_id: String,
 
@@ -46,23 +67,35 @@ pub struct Config {
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_REDIRECT_URL",
-        default_value = "http://127.0.0.1:8082/callback", help_heading = "OIDC Configuration"
+        default_value = "http://127.0.0.1:8082/callback",
+        help_heading = "OIDC Configuration"
     )]
     pub oidc_redirect_url: String,
 
     /// User ID for vault storage
-    #[arg(long, env = "MCP_PASSPORT_USER_ID", default_value = "default_user", help_heading = "Protocol & Security")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_USER_ID",
+        default_value = "default_user",
+        help_heading = "Protocol & Security"
+    )]
     pub user_id: String,
 
     /// Log level (error, warn, info, debug, trace)
-    #[arg(long, env = "MCP_PASSPORT_LOG_LEVEL", default_value = "info", help_heading = "Local Environment & Logging")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_LOG_LEVEL",
+        default_value = "info",
+        help_heading = "Local Environment & Logging"
+    )]
     pub log_level: String,
 
     /// MCP Protocol Version to include in headers
     #[arg(
         long,
         env = "MCP_PASSPORT_MCP_PROTOCOL_VERSION",
-        default_value = "2025-11-25", help_heading = "Protocol & Security"
+        default_value = "2025-11-25",
+        help_heading = "Protocol & Security"
     )]
     pub mcp_protocol_version: String,
 
@@ -74,12 +107,17 @@ pub struct Config {
     #[arg(
         long,
         env = "MCP_PASSPORT_LOG_DIR",
-        default_value = "/tmp/mcp-passport", help_heading = "Local Environment & Logging"
+        default_value = "/tmp/mcp-passport",
+        help_heading = "Local Environment & Logging"
     )]
     pub log_dir: String,
 
     /// Directory containing success.html and failure.html for the auth callback
-    #[arg(long, env = "MCP_PASSPORT_TEMPLATE_DIR", help_heading = "Local Environment & Logging")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_TEMPLATE_DIR",
+        help_heading = "Local Environment & Logging"
+    )]
     pub template_dir: Option<std::path::PathBuf>,
 }
 
