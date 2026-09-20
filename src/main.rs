@@ -1,3 +1,4 @@
+use colored::Colorize;
 use mcp_passport::config::Config;
 use tracing::info;
 use tracing_subscriber::fmt;
@@ -18,14 +19,14 @@ async fn main() -> anyhow::Result<()> {
         // Set secure permissions (0o700) on the log directory during creation to prevent unauthorized local access to trace contexts
         builder.mode(0o700);
         if let Err(e) = builder.create(&config.log_dir) {
-            eprintln!("Failed to create secure log directory: {}", e);
+            eprintln!("{} Failed to create secure log directory at {}: {}", "error:".red().bold(), config.log_dir, e);
             std::process::exit(1);
         }
     }
     #[cfg(not(unix))]
     {
         if let Err(e) = std::fs::create_dir_all(&config.log_dir) {
-            eprintln!("Failed to create log directory: {}", e);
+            eprintln!("{} Failed to create log directory at {}: {}", "error:".red().bold(), config.log_dir, e);
             std::process::exit(1);
         }
     }
