@@ -11,33 +11,58 @@ pub enum AuthScheme {
 #[command(author, version, about, long_about = None)]
 pub struct Config {
     /// Remote MCP server JSON-RPC endpoint
-    #[arg(long, env = "MCP_PASSPORT_REMOTE_MCP_URL")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_REMOTE_MCP_URL",
+        help_heading = "Remote Server"
+    )]
     pub remote_mcp_url: String,
 
     /// Remote MCP server SSE endpoint
-    #[arg(long, env = "MCP_PASSPORT_REMOTE_SSE_URL")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_REMOTE_SSE_URL",
+        help_heading = "Remote Server"
+    )]
     pub remote_sse_url: String,
 
     /// OIDC Discovery URL
-    #[arg(long, env = "MCP_PASSPORT_OIDC_DISCOVERY_URL")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_DISCOVERY_URL",
+        help_heading = "OIDC Configuration"
+    )]
     pub oidc_discovery_url: Option<String>,
 
     /// Keycloak OIDC Authorization URL (Override if not using discovery)
-    #[arg(long, env = "MCP_PASSPORT_KC_AUTH_URL")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_KC_AUTH_URL",
+        help_heading = "OIDC Manual Overrides"
+    )]
     pub kc_auth_url: Option<String>,
 
     /// Keycloak OIDC Token URL (Override if not using discovery)
-    #[arg(long, env = "MCP_PASSPORT_KC_TOKEN_URL")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_KC_TOKEN_URL",
+        help_heading = "OIDC Manual Overrides"
+    )]
     pub kc_token_url: Option<String>,
 
     /// Keycloak OIDC Pushed Authorization Request (PAR) URL (Override if not using discovery)
-    #[arg(long, env = "MCP_PASSPORT_KC_PAR_URL")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_KC_PAR_URL",
+        help_heading = "OIDC Manual Overrides"
+    )]
     pub kc_par_url: Option<String>,
 
     /// OIDC Client ID
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_CLIENT_ID",
+        help_heading = "OIDC Configuration",
         default_value = "mcp-passport"
     )]
     pub oidc_client_id: String,
@@ -46,40 +71,57 @@ pub struct Config {
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_REDIRECT_URL",
+        help_heading = "OIDC Configuration",
         default_value = "http://127.0.0.1:8082/callback"
     )]
     pub oidc_redirect_url: String,
 
     /// User ID for vault storage
-    #[arg(long, env = "MCP_PASSPORT_USER_ID", default_value = "default_user")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_USER_ID",
+        help_heading = "Local Environment",
+        default_value = "default_user"
+    )]
     pub user_id: String,
 
     /// Log level (error, warn, info, debug, trace)
-    #[arg(long, env = "MCP_PASSPORT_LOG_LEVEL", default_value = "info")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_LOG_LEVEL",
+        help_heading = "Local Environment",
+        default_value = "info"
+    )]
     pub log_level: String,
 
     /// MCP Protocol Version to include in headers
     #[arg(
         long,
         env = "MCP_PASSPORT_MCP_PROTOCOL_VERSION",
+        help_heading = "Remote Server",
         default_value = "2025-11-25"
     )]
     pub mcp_protocol_version: String,
 
     /// Authorization header scheme (bearer or dpop)
-    #[arg(long, env = "MCP_PASSPORT_AUTH_SCHEME", value_enum, default_value_t = AuthScheme::Bearer)]
+    #[arg(long, env = "MCP_PASSPORT_AUTH_SCHEME", help_heading = "OIDC Configuration", value_enum, default_value_t = AuthScheme::Bearer)]
     pub auth_scheme: AuthScheme,
 
     /// Directory for logs
     #[arg(
         long,
         env = "MCP_PASSPORT_LOG_DIR",
+        help_heading = "Local Environment",
         default_value = "/tmp/mcp-passport"
     )]
     pub log_dir: String,
 
     /// Directory containing success.html and failure.html for the auth callback
-    #[arg(long, env = "MCP_PASSPORT_TEMPLATE_DIR")]
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_TEMPLATE_DIR",
+        help_heading = "Local Environment"
+    )]
     pub template_dir: Option<std::path::PathBuf>,
 }
 
