@@ -105,14 +105,29 @@ impl DpopKey {
             ath,
         };
 
-        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_string(&header)?);
-        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_string(&claims)?);
+        let header_str = serde_json::to_string(&header)?;
+        let claims_str = serde_json::to_string(&claims)?;
 
-        let message = format!("{}.{}", header_b64, payload_b64);
+        // Pre-allocate buffer for the JWT message (header + '.' + payload)
+        // Base64 encoding size is roughly 4/3 of the input size
+        let header_len = (header_str.len() * 4).div_ceil(3);
+        let claims_len = (claims_str.len() * 4).div_ceil(3);
+        let mut message = String::with_capacity(header_len + 1 + claims_len);
+
+        URL_SAFE_NO_PAD.encode_string(header_str.as_bytes(), &mut message);
+        message.push('.');
+        URL_SAFE_NO_PAD.encode_string(claims_str.as_bytes(), &mut message);
+
         let signature: p256::ecdsa::Signature = self.signing_key.sign(message.as_bytes());
-        let signature_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
 
-        Ok(format!("{}.{}", message, signature_b64))
+        // Pre-allocate buffer for the final JWT (message + '.' + signature)
+        let sig_len = 86; // approximate length of base64url encoded P-256 signature
+        let mut final_jwt = String::with_capacity(message.len() + 1 + sig_len);
+        final_jwt.push_str(&message);
+        final_jwt.push('.');
+        URL_SAFE_NO_PAD.encode_string(signature.to_bytes(), &mut final_jwt);
+
+        Ok(final_jwt)
     }
 }
 
