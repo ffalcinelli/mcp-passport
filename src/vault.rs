@@ -13,11 +13,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[allow(dead_code)]
-static TEST_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+pub(crate) static TEST_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
 
 // In-memory fallback for testing and headless environments where system keyring might be missing/unavailable
-static MEMORY_VAULT: Lazy<Mutex<HashMap<String, String>>> =
+pub(crate) static MEMORY_VAULT: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// A secure storage abstraction for tokens and keys.
