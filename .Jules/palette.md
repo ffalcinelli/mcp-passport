@@ -1,3 +1,6 @@
 ## 2026-09-13 - [Authentication Prompt UX Improvement]
 **Learning:** For interactive CLI prompts, bypass structured logging mechanisms (like tracing's `warn!`) which append timestamps and log levels. Instead, use `eprintln!` combined with crates like `colored` to output clear, distinct, and highly visible prompts directly to stderr, ensuring they are not buried by log formatters and don't interfere with piped stdout.
 **Action:** Always evaluate whether user-facing actionable prompts should use standard logging or direct stderr printing. Default to styled `eprintln!` for interactive prompts that require immediate user action.
+## 2026-09-15 - [CLI Argument Grouping]
+**Learning:** Organizing CLI arguments into logical groups using `clap`'s `help_heading` attribute significantly improves readability and scannability of the `--help` output without changing runtime functionality. This is a low-risk, high-impact DX win.
+**Action:** Always look for opportunities to apply `help_heading` in CLI apps with more than ~8 arguments to prevent walls of text in `--help`.
