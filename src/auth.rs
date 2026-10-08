@@ -412,8 +412,15 @@ impl AuthManager {
             .map(|m| m.scopes)
             .unwrap_or_default();
         let scopes = self.select_scopes(scopes, &previous);
+        let dpop_jkt = dpop_key.jkt()?;
         let par_data = self
-            .perform_par_request(&pkce_challenge, &state_val, &scopes, &server_handle)
+            .perform_par_request(
+                &pkce_challenge,
+                &state_val,
+                &scopes,
+                &dpop_jkt,
+                &server_handle,
+            )
             .await?;
 
         // 5. Direct user to Auth URL
@@ -516,6 +523,7 @@ impl AuthManager {
         pkce_challenge: &str,
         state_val: &str,
         scopes: &[String],
+        dpop_jkt: &str,
         server_handle: &tokio::task::JoinHandle<()>,
     ) -> Result<ParResponse> {
         info!("Step 1: Pushed Authorization Request (PAR)...");
@@ -527,6 +535,8 @@ impl AuthManager {
             ("code_challenge_method", "S256"),
             ("state", state_val),
             ("resource", self.resource.as_str()),
+            // Binds the authorization code to our DPoP key (RFC 9449 §10).
+            ("dpop_jkt", dpop_jkt),
         ];
 
         let scope_str = scopes.join(" ");

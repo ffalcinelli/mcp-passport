@@ -56,6 +56,8 @@ pub struct Proxy {
     legacy_session_tx: watch::Sender<bool>,
     /// Latest DPoP nonce provided by the remote server (RFC 9449 §9).
     rs_nonce: std::sync::Mutex<Option<String>>,
+    /// Credential generation for which a proactive refresh was already tried.
+    proactive_refresh_gen: std::sync::Mutex<Option<u64>>,
     /// Version negotiated by a legacy `initialize` handshake.
     negotiated_version: std::sync::Mutex<Option<String>>,
     /// `x-mcp-header` annotations of the tools seen in `tools/list` results.
@@ -73,6 +75,8 @@ pub enum ReauthReason {
     Unauthorized,
     /// 403 `insufficient_scope`: more scopes are needed, which takes a new login.
     StepUp,
+    /// The token is about to expire: refresh it if possible, never log in.
+    Expiring,
 }
 
 /// What the proxy remembers about re-authentication attempts.
@@ -102,10 +106,26 @@ enum Outcome {
     HeaderMismatch(Value),
 }
 
+/// Refresh this long before the access token expires.
+const EXPIRY_MARGIN_SECS: u64 = 30;
+
 /// A token and the DPoP key it is bound to.
 struct Credentials {
     token: String,
     key: DpopKey,
+    /// When the token expires (Unix seconds), if known.
+    expires_at: Option<u64>,
+}
+
+impl Credentials {
+    fn expires_soon(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        self.expires_at
+            .is_some_and(|at| at <= now + EXPIRY_MARGIN_SECS)
+    }
 }
 
 fn validate_resource_metadata(metadata_url: Option<&str>, remote_url: &str) -> Option<String> {
@@ -173,6 +193,7 @@ impl Proxy {
             reauth_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             legacy_session_tx: watch::channel(false).0,
             rs_nonce: std::sync::Mutex::new(None),
+            proactive_refresh_gen: std::sync::Mutex::new(None),
             negotiated_version: std::sync::Mutex::new(None),
             tool_headers: std::sync::Mutex::default(),
         })
@@ -188,6 +209,10 @@ impl Proxy {
             Some(bytes) => Ok(Some(Credentials {
                 token,
                 key: DpopKey::from_bytes(&bytes)?,
+                expires_at: self
+                    .vault
+                    .get_meta(&self.user_id)?
+                    .and_then(|m| m.expires_at),
             })),
             None => {
                 warn!("Stored token has no DPoP key; it will not be used.");
@@ -213,6 +238,17 @@ impl Proxy {
     fn wants_dpop_nonce(status: StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
         status == StatusCode::UNAUTHORIZED
             && WwwAuthenticate::parse(headers).has_error("use_dpop_nonce")
+    }
+
+    /// Returns true the first time it is called for `gen`.
+    fn claim_proactive_refresh(&self, gen: u64) -> bool {
+        match self.proactive_refresh_gen.lock() {
+            Ok(mut slot) if *slot != Some(gen) => {
+                *slot = Some(gen);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The current credential generation.
@@ -411,7 +447,7 @@ impl Proxy {
             }
         }
 
-        if let Some(Credentials { token, key }) = credentials {
+        if let Some(Credentials { token, key, .. }) = credentials {
             let nonce = self.rs_nonce.lock().ok().and_then(|n| n.clone());
             let dpop_proof =
                 key.generate_proof_with_ath(method.as_str(), url, Some(token), nonce.as_deref())?;
@@ -546,10 +582,30 @@ impl Proxy {
             }
 
             self.wait_for_airlock().await?;
-            let gen = self.generation();
+            let mut gen = self.generation();
             if loaded_gen != Some(gen) {
                 credentials = self.load_credentials()?;
                 loaded_gen = Some(gen);
+            }
+
+            // Renew a token that is about to expire instead of waiting for a 401
+            // (once per credential generation, so a failing refresh isn't retried
+            // on every request).
+            if credentials.as_ref().is_some_and(Credentials::expires_soon)
+                && self.claim_proactive_refresh(gen)
+            {
+                info!("Access token expires soon; refreshing it.");
+                if let Err(e) = self
+                    .trigger_reauth(gen, None, None, ReauthReason::Expiring)
+                    .await
+                {
+                    warn!("Proactive refresh failed: {:#}", e);
+                }
+                gen = self.generation();
+                if loaded_gen != Some(gen) {
+                    credentials = self.load_credentials()?;
+                    loaded_gen = Some(gen);
+                }
             }
 
             let response = self.execute_request(credentials.as_ref(), payload).await?;
@@ -771,7 +827,10 @@ impl Proxy {
                 let reason = state.last_error.clone().unwrap_or_default();
                 anyhow::bail!("Re-authentication failed: {}", reason);
             } else if let Some(last) = &state.last_success {
-                if last.at.elapsed() < AUTH_LOOP_WINDOW && covers(last) {
+                if reason != ReauthReason::Expiring
+                    && last.at.elapsed() < AUTH_LOOP_WINDOW
+                    && covers(last)
+                {
                     if last.via_refresh {
                         info!("The refreshed token was rejected; falling back to a new login.");
                         allow_refresh = false;
@@ -797,20 +856,25 @@ impl Proxy {
             let auth_manager = self.ensure_auth_manager(metadata_url).await?;
             auth_manager.enforce_issuer_binding(&self.user_id)?;
             if allow_refresh && auth_manager.refresh(&self.user_id).await? {
-                return Ok(true);
+                return Ok(Some(true));
+            }
+            if reason == ReauthReason::Expiring {
+                // No refresh possible: keep the current token until it is rejected.
+                return Ok(None);
             }
             auth_manager
                 .reauthenticate(&self.user_id, scopes.clone(), None)
                 .await?;
-            Ok::<_, anyhow::Error>(false)
+            Ok::<_, anyhow::Error>(Some(false))
         }
         .await;
 
         {
             let mut state = self.reauth_state.lock().await;
-            state.attempts += 1;
             match &result {
-                Ok(via_refresh) => {
+                Ok(None) => {}
+                Ok(Some(via_refresh)) => {
+                    state.attempts += 1;
                     state.last_error = None;
                     state.last_success = Some(LastSuccess {
                         at: std::time::Instant::now(),
@@ -822,6 +886,7 @@ impl Proxy {
                     info!("Re-authentication successful. Deactivating Airlock...");
                 }
                 Err(e) => {
+                    state.attempts += 1;
                     error!("Re-authentication failed: {:?}", e);
                     state.last_error = Some(format!("{e:#}"));
                 }
