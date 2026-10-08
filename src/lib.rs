@@ -4,6 +4,7 @@ pub mod config;
 pub mod crypto;
 mod discovery;
 pub mod logging;
+mod mcp;
 mod net;
 pub mod proxy;
 pub mod templates;

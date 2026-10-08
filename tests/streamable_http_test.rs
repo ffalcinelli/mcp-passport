@@ -9,6 +9,7 @@ use mcp_passport::crypto::DpopKey;
 use mcp_passport::proxy::Proxy;
 use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -323,4 +324,115 @@ async fn test_listen_sse_resumes_with_last_event_id() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen[0], None);
     assert_eq!(seen[1].as_deref(), Some("evt-1"));
+}
+
+type Seen = Arc<Mutex<Vec<HashMap<String, String>>>>;
+
+/// A server that records the headers of each POST and answers `initialize`
+/// with a negotiated version and a session id.
+async fn header_recorder() -> (String, Seen) {
+    let seen: Seen = Arc::default();
+    let s = seen.clone();
+    let app = Router::new().route(
+        "/mcp",
+        post(
+            move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+                let s = s.clone();
+                async move {
+                    let map = headers
+                        .iter()
+                        .map(|(k, v)| {
+                            (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
+                        })
+                        .collect();
+                    s.lock().unwrap().push(map);
+                    if body["method"] == "initialize" {
+                        return (
+                            [("mcp-session-id", "legacy-1")],
+                            axum::Json(json!({"jsonrpc": "2.0", "id": body["id"],
+                            "result": {"protocolVersion": "2025-06-18"}})),
+                        )
+                            .into_response();
+                    }
+                    axum::Json(json!({"jsonrpc": "2.0", "id": body["id"], "result": {}}))
+                        .into_response()
+                }
+            },
+        ),
+    );
+    (format!("{}/mcp", serve(app).await), seen)
+}
+
+fn modern(id: u64, method: &str, params: Value) -> Value {
+    let mut params = params;
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+}
+
+#[tokio::test]
+async fn test_modern_request_headers() {
+    let (url, seen) = header_recorder().await;
+    let proxy = authed_proxy(&url);
+
+    proxy
+        .call(modern(
+            1,
+            "tools/call",
+            json!({"name": "get_weather", "arguments": {}}),
+        ))
+        .await
+        .unwrap();
+    proxy
+        .call(modern(
+            2,
+            "resources/read",
+            json!({"uri": "file:///café.txt"}),
+        ))
+        .await
+        .unwrap();
+    proxy
+        .call(modern(3, "tools/list", json!({})))
+        .await
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0]["mcp-protocol-version"], "2026-07-28");
+    assert_eq!(seen[0]["mcp-method"], "tools/call");
+    assert_eq!(seen[0]["mcp-name"], "get_weather");
+    assert_eq!(seen[1]["mcp-name"], "=?base64?ZmlsZTovLy9jYWbDqS50eHQ=?=");
+    assert_eq!(seen[2]["mcp-method"], "tools/list");
+    assert!(!seen[2].contains_key("mcp-name"));
+}
+
+#[tokio::test]
+async fn test_legacy_negotiated_version_and_session() {
+    let (url, seen) = header_recorder().await;
+    let proxy = authed_proxy(&url);
+
+    proxy
+        .call(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {}}}))
+        .await
+        .unwrap();
+    proxy
+        .call(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
+        .await
+        .unwrap();
+    // A modern request on the same proxy never carries the legacy session.
+    proxy
+        .call(modern(3, "tools/list", json!({})))
+        .await
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    // `initialize` announces the version it requests...
+    assert_eq!(seen[0]["mcp-protocol-version"], "2025-11-25");
+    // ...later legacy requests use the negotiated one, with the session.
+    assert_eq!(seen[1]["mcp-protocol-version"], "2025-06-18");
+    assert_eq!(seen[1]["mcp-session-id"], "legacy-1");
+    assert_eq!(seen[2]["mcp-protocol-version"], "2026-07-28");
+    assert!(!seen[2].contains_key("mcp-session-id"));
 }

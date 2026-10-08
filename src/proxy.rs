@@ -8,6 +8,7 @@ use crate::auth::{AuthManager, OidcConfig};
 use crate::challenge::WwwAuthenticate;
 use crate::config::AuthScheme;
 use crate::crypto::DpopKey;
+use crate::mcp::{self, Era};
 use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
@@ -54,6 +55,8 @@ pub struct Proxy {
     connected_tx: watch::Sender<bool>,
     /// Latest DPoP nonce provided by the remote server (RFC 9449 §9).
     rs_nonce: std::sync::Mutex<Option<String>>,
+    /// Version negotiated by a legacy `initialize` handshake.
+    negotiated_version: std::sync::Mutex<Option<String>>,
 }
 
 /// A fresh token rejected within this window means re-authenticating again
@@ -159,6 +162,7 @@ impl Proxy {
             reauth_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             connected_tx: watch::channel(false).0,
             rs_nonce: std::sync::Mutex::new(None),
+            negotiated_version: std::sync::Mutex::new(None),
         })
     }
 
@@ -236,18 +240,66 @@ impl Proxy {
         Ok(am_shared)
     }
 
+    /// The `MCP-Protocol-Version` for a message: the `_meta` version of a
+    /// modern request, the requested version of `initialize`, the version a
+    /// legacy handshake negotiated, or the configured fallback.
+    fn protocol_version_for(&self, payload: Option<&Value>) -> String {
+        if let Some(payload) = payload {
+            if let Some(v) = mcp::meta_protocol_version(payload) {
+                return v.to_string();
+            }
+            if mcp::method_of(payload) == Some("initialize") {
+                if let Some(v) = payload
+                    .pointer("/params/protocolVersion")
+                    .and_then(Value::as_str)
+                {
+                    return v.to_string();
+                }
+            }
+        }
+        self.negotiated_version
+            .lock()
+            .ok()
+            .and_then(|v| v.clone())
+            .unwrap_or_else(|| self.protocol_version.clone())
+    }
+
+    /// Inspects a message the server sent in reply to `request` before it is
+    /// forwarded, and returns the message to forward.
+    fn observe_response(&self, request: &Value, message: Value) -> Value {
+        if mcp::method_of(request) == Some("initialize") && message.get("id") == request.get("id") {
+            if let Some(v) = message
+                .pointer("/result/protocolVersion")
+                .and_then(Value::as_str)
+            {
+                info!("Legacy MCP session negotiated protocol version {}", v);
+                if let Ok(mut slot) = self.negotiated_version.lock() {
+                    *slot = Some(v.to_string());
+                }
+            }
+        }
+        message
+    }
+
     /// Builds a request to the remote server with the MCP headers and, when a
-    /// token is available, the Authorization and DPoP headers.
+    /// token is available, the Authorization and DPoP headers. `payload` is the
+    /// JSON-RPC message of a POST.
     async fn build_request(
         &self,
         method: reqwest::Method,
         url: &str,
         credentials: Option<&Credentials>,
+        payload: Option<&Value>,
     ) -> Result<reqwest::RequestBuilder> {
         let mut request = self
             .http_client
             .request(method.clone(), url)
-            .header("MCP-Protocol-Version", &self.protocol_version);
+            .header("MCP-Protocol-Version", self.protocol_version_for(payload));
+        if let Some(payload) = payload {
+            for (name, value) in mcp::standard_headers(payload) {
+                request = request.header(name, value);
+            }
+        }
 
         if let Some(Credentials { token, key }) = credentials {
             let nonce = self.rs_nonce.lock().ok().and_then(|n| n.clone());
@@ -262,8 +314,12 @@ impl Proxy {
                 .header("DPoP", dpop_proof);
         }
 
-        if let Some(s) = &*self.session_id.lock().await {
-            request = request.header("MCP-Session-Id", s);
+        // Sessions only exist in the legacy era.
+        let legacy = payload.is_none_or(|p| mcp::era_of(p) == Era::Legacy);
+        if legacy {
+            if let Some(s) = &*self.session_id.lock().await {
+                request = request.header("MCP-Session-Id", s);
+            }
         }
         Ok(request)
     }
@@ -279,7 +335,12 @@ impl Proxy {
             );
         }
         let request = self
-            .build_request(reqwest::Method::POST, &self.remote_url, credentials)
+            .build_request(
+                reqwest::Method::POST,
+                &self.remote_url,
+                credentials,
+                Some(payload),
+            )
             .await?
             .header(ACCEPT, "application/json, text/event-stream");
         Ok(request.json(payload).send().await?)
@@ -415,7 +476,7 @@ impl Proxy {
             .is_some_and(|v| v.starts_with("text/event-stream"));
 
         if status.is_success() && is_event_stream {
-            return forward_event_stream(response, payload.get("id"), out).await;
+            return self.forward_event_stream(response, &payload, out).await;
         }
 
         let body = response.bytes().await?;
@@ -425,6 +486,7 @@ impl Proxy {
             }
             let value: Value = serde_json::from_slice(&body)
                 .context("Remote MCP server returned a body that is not JSON")?;
+            let value = self.observe_response(&payload, value);
             let _ = out.send(value.to_string()).await;
             return Ok(());
         }
@@ -474,6 +536,45 @@ impl Proxy {
             Some(i) => Some(parsed.swap_remove(i)),
             None => parsed.pop(),
         })
+    }
+
+    /// Forwards each event of a `text/event-stream` POST response to `out`.
+    ///
+    /// Fails if the stream ends before the response to the request arrived, so
+    /// that the client gets an error instead of waiting forever.
+    async fn forward_event_stream(
+        &self,
+        response: reqwest::Response,
+        request: &Value,
+        out: &mpsc::Sender<String>,
+    ) -> Result<()> {
+        use eventsource_stream::Eventsource;
+        use futures::StreamExt;
+
+        let request_id = request.get("id");
+        let mut answered = request_id.is_none();
+        let mut events = response.bytes_stream().eventsource();
+        while let Some(event) = events.next().await {
+            let event = event.context("Error reading SSE response stream")?;
+            if event.data.is_empty() {
+                continue;
+            }
+            let data = match serde_json::from_str::<Value>(&event.data) {
+                Ok(msg) => {
+                    if !answered {
+                        answered = msg.get("id") == request_id
+                            && (msg.get("result").is_some() || msg.get("error").is_some());
+                    }
+                    self.observe_response(request, msg).to_string()
+                }
+                Err(_) => event.data,
+            };
+            let _ = out.send(data).await;
+        }
+        if !answered {
+            anyhow::bail!("SSE response stream ended before the response was received");
+        }
+        Ok(())
     }
 
     /// Resolves once a POST to the remote server has succeeded (so the session
@@ -613,7 +714,7 @@ impl Proxy {
             }
 
             let mut request = self
-                .build_request(reqwest::Method::GET, sse_url, credentials.as_ref())
+                .build_request(reqwest::Method::GET, sse_url, credentials.as_ref(), None)
                 .await?;
             if let Some(id) = &last_event_id {
                 // Lets the server replay what we missed (resumability).
@@ -706,39 +807,6 @@ impl Proxy {
             tokio::time::sleep(delay).await;
         }
     }
-}
-
-/// Forwards each event of a `text/event-stream` POST response to `out`.
-///
-/// Fails if the stream ends before the response to `request_id` arrived, so
-/// that the client gets an error instead of waiting forever.
-async fn forward_event_stream(
-    response: reqwest::Response,
-    request_id: Option<&Value>,
-    out: &mpsc::Sender<String>,
-) -> Result<()> {
-    use eventsource_stream::Eventsource;
-    use futures::StreamExt;
-
-    let mut answered = request_id.is_none();
-    let mut events = response.bytes_stream().eventsource();
-    while let Some(event) = events.next().await {
-        let event = event.context("Error reading SSE response stream")?;
-        if event.data.is_empty() {
-            continue;
-        }
-        if !answered {
-            if let Ok(msg) = serde_json::from_str::<Value>(&event.data) {
-                answered = msg.get("id") == request_id
-                    && (msg.get("result").is_some() || msg.get("error").is_some());
-            }
-        }
-        let _ = out.send(event.data).await;
-    }
-    if !answered {
-        anyhow::bail!("SSE response stream ended before the response was received");
-    }
-    Ok(())
 }
 
 #[cfg(test)]
