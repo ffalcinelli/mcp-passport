@@ -10,7 +10,7 @@ pub enum AuthScheme {
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Config {
-    /// Remote MCP server JSON-RPC endpoint
+    /// Remote MCP endpoint (Streamable HTTP), e.g. https://mcp.example.com/mcp
     #[arg(
         long,
         env = "MCP_PASSPORT_REMOTE_MCP_URL",
@@ -18,7 +18,7 @@ pub struct Config {
     )]
     pub remote_mcp_url: String,
 
-    /// Remote MCP server SSE endpoint (defaults to --remote-mcp-url, as in Streamable HTTP)
+    /// Standalone SSE endpoint of legacy (2025-11-25 and earlier) servers [default: --remote-mcp-url]
     #[arg(
         long,
         env = "MCP_PASSPORT_REMOTE_SSE_URL",
@@ -26,7 +26,7 @@ pub struct Config {
     )]
     pub remote_sse_url: Option<String>,
 
-    /// MCP Protocol Version to include in headers
+    /// Fallback MCP-Protocol-Version, used only when a message doesn't determine its version
     #[arg(
         long,
         env = "MCP_PASSPORT_MCP_PROTOCOL_VERSION",
@@ -35,7 +35,7 @@ pub struct Config {
     )]
     pub mcp_protocol_version: String,
 
-    /// Authorization header scheme (bearer or dpop)
+    /// Authorization header scheme; the DPoP proof header is sent either way
     #[arg(
         long,
         env = "MCP_PASSPORT_AUTH_SCHEME",
@@ -45,7 +45,7 @@ pub struct Config {
     )]
     pub auth_scheme: AuthScheme,
 
-    /// OIDC Discovery URL
+    /// Authorization server metadata URL (skips discovery from the MCP server)
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_DISCOVERY_URL",
@@ -53,7 +53,7 @@ pub struct Config {
     )]
     pub oidc_discovery_url: Option<String>,
 
-    /// Keycloak OIDC Authorization URL (Override if not using discovery)
+    /// Authorization endpoint override
     #[arg(
         long,
         env = "MCP_PASSPORT_KC_AUTH_URL",
@@ -61,7 +61,7 @@ pub struct Config {
     )]
     pub kc_auth_url: Option<String>,
 
-    /// Keycloak OIDC Token URL (Override if not using discovery)
+    /// Token endpoint override
     #[arg(
         long,
         env = "MCP_PASSPORT_KC_TOKEN_URL",
@@ -69,7 +69,7 @@ pub struct Config {
     )]
     pub kc_token_url: Option<String>,
 
-    /// Keycloak OIDC Pushed Authorization Request (PAR) URL (Override if not using discovery)
+    /// Pushed Authorization Request (PAR) endpoint override
     #[arg(
         long,
         env = "MCP_PASSPORT_KC_PAR_URL",
@@ -102,7 +102,7 @@ pub struct Config {
     )]
     pub oidc_client_id: String,
 
-    /// Local Loopback Redirect URL for OIDC
+    /// Loopback redirect URL for the login callback (must be registered with the provider)
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_REDIRECT_URL",
@@ -111,7 +111,7 @@ pub struct Config {
     )]
     pub oidc_redirect_url: String,
 
-    /// User ID for vault storage
+    /// Name under which credentials are stored in the OS keychain
     #[arg(
         long,
         env = "MCP_PASSPORT_USER_ID",
