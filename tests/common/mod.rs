@@ -53,6 +53,8 @@ pub async fn start_keycloak() -> anyhow::Result<Keycloak> {
             "/opt/keycloak/data/import/realm.json",
         ))
         .with_cmd(["start-dev", "--import-realm"])
+        // A cold start with a realm import can take about a minute.
+        .with_startup_timeout(std::time::Duration::from_secs(180))
         .start()
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start Keycloak (is Docker running?): {e:?}"))?;
@@ -143,6 +145,7 @@ pub async fn start_chrome() -> anyhow::Result<ContainerAsync<GenericImage>> {
     GenericImage::new(CHROME_IMAGE.0, CHROME_IMAGE.1)
         .with_wait_for(WaitFor::message_on_stdout("Started Selenium Standalone"))
         .with_network("host")
+        .with_startup_timeout(std::time::Duration::from_secs(180))
         .start()
         .await
         .map_err(|e| {
