@@ -14,6 +14,7 @@ The project is built on five core architectural pillars:
 - **Lazy Auth Flow**: `AuthManager` is initialized lazily upon discovering the authorization server's metadata from the remote MCP server.
 - **Dynamic Discovery**: `src/discovery.rs` fetches RFC 9728 Protected Resource Metadata (from a challenge's validated `resource_metadata`, or the path-inserted/root `.well-known/oauth-protected-resource`), then RFC 8414 / OIDC metadata of `authorization_servers[0]`, validating `resource` and `issuer`. Precedence: `--kc-*-url` overrides, then `--oidc-discovery-url`, then dynamic discovery.
 - **Airlock generations**: `Proxy::trigger_reauth` takes the credential generation the rejected request used, so concurrent rejections share one attempt; 401 tries a refresh first, 403 step-up always logs in.
+- **MCP eras** (`src/mcp.rs`): a message with `_meta.io.modelcontextprotocol/protocolVersion` is modern (2026-07-28): it gets `Mcp-Method`/`Mcp-Name`/`Mcp-Param-*` headers, no session id, and stdio cancellation is translated into closing its response stream. Anything else is legacy (initialize, sessions, GET stream).
 - **Refresh & DPoP nonces**: refresh tokens are stored per server and redeemed with the bound DPoP key; `DPoP-Nonce` / `use_dpop_nonce` are handled for both the AS and the MCP server.
 - **Resource Signaling**: Includes the MCP server URL as the `resource` parameter in PAR and Token requests (RFC 8707).
 - **Flexible Headers**: Supports both `Bearer` (MCP default) and `DPoP` authorization schemes via the `--auth-scheme` flag.
@@ -39,7 +40,9 @@ The project is built on five core architectural pillars:
 - **Mock Tests** (no Docker needed):
     - `tests/mock_oidc_test.rs`: Fast-feedback tests for protocol-level logic.
     - `tests/streamable_http_test.rs`, `tests/refresh_test.rs`, `tests/dpop_nonce_test.rs`: transport, refresh and nonce behaviour.
+    - `tests/spec_2026_test.rs`: MCP 2026-07-28 conformance over the real stdio path against `tests/common/mcp_server.rs`, a strict dual-era server.
     - Use `Vault::in_memory(..)` and `Timeouts::fast()` in tests; never touch the real keychain.
+- **Keycloak**: Docker suites pin Keycloak 26.8.0 and Selenium 4.49.0 in `tests/common/mod.rs`. `tests/keycloak_2026_e2e_test.rs` is the full end-to-end check.
 
 ## Key Commands
 - **Test All**: `cargo test`

@@ -11,9 +11,9 @@
 
 ## ✨ Key Features
 
-- **MCP Compliance (Spec 2025-11-25)**: Full implementation of the MCP Authorization specification, including dynamic discovery and resource signaling.
+- **MCP 2026-07-28, dual-era**: Forwards both modern (per-request `_meta`, revision 2026-07-28) and legacy (`initialize`-based, up to 2025-11-25) clients, applying the right Streamable HTTP rules to each. Implements the 2026-07-28 Authorization specification: discovery, PKCE verification, `iss` validation, scope selection and step-up, issuer-bound credentials, and Client ID Metadata Documents.
 - **Dynamic Discovery**: Locates the authorization server the way the MCP spec describes: RFC 9728 Protected Resource Metadata (from the `resource_metadata` of a 401 challenge, or the `/.well-known/oauth-protected-resource` URIs), then RFC 8414 / OpenID Connect metadata of the listed authorization server, with `issuer` validation.
-- **Streamable HTTP**: Handles JSON and `text/event-stream` responses to POSTs, `202 Accepted`, session ids (including expiry) and a resumable GET event stream.
+- **Streamable HTTP**: Handles JSON and `text/event-stream` responses to POSTs and `202 Accepted`. Modern requests get the required `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name` headers, `x-mcp-header` tool parameters are mirrored into `Mcp-Param-*` headers (invalid tool definitions are filtered from `tools/list`), and a stdio `notifications/cancelled` closes the request's response stream. `subscriptions/listen` streams pass straight through. Legacy servers keep their session id and standalone GET stream.
 - **FAPI 2.0 Security**: Financial-grade security patterns including **Pushed Authorization Requests (PAR)** and **PKCE**.
 - **DPoP (Demonstrating Proof-of-Possession)**: Cryptographically binds access tokens to ephemeral ES256 keys, preventing token replay attacks.
 - **"Airlock" Mechanism**: Automatically suspends JSON-RPC requests to trigger OIDC flows, supporting 401 expiration and **403 Step-up** (insufficient scope) challenges. Concurrent requests share a single login.
@@ -105,8 +105,10 @@ If anything fails along the way (network, HTTP error, login), the client receive
 | Remote MCP URL | `--remote-mcp-url` | `MCP_PASSPORT_REMOTE_MCP_URL` | **Required** |
 | Remote SSE URL | `--remote-sse-url` | `MCP_PASSPORT_REMOTE_SSE_URL` | Same as the MCP URL (Streamable HTTP) |
 | Auth Scheme | `--auth-scheme` | `MCP_PASSPORT_AUTH_SCHEME` | `bearer` |
-| Protocol Version | `--mcp-protocol-version` | `MCP_PASSPORT_MCP_PROTOCOL_VERSION` | `2025-11-25` |
+| Protocol Version (fallback) | `--mcp-protocol-version` | `MCP_PASSPORT_MCP_PROTOCOL_VERSION` | `2025-11-25` (only used when the message itself doesn't determine the version) |
 | Discovery URL | `--oidc-discovery-url` | `MCP_PASSPORT_OIDC_DISCOVERY_URL` | Optional (dynamic discovery) |
+| Expected issuer | `--oidc-issuer` | `MCP_PASSPORT_OIDC_ISSUER` | Optional: the authorization server your client ID is registered with |
+| Offline access | `--oidc-offline-access` | `MCP_PASSPORT_OIDC_OFFLINE_ACCESS` | off |
 | AS endpoint overrides | `--kc-auth-url`, `--kc-token-url`, `--kc-par-url` | `MCP_PASSPORT_KC_AUTH_URL`, ... | Optional |
 | Client ID | `--oidc-client-id` | `MCP_PASSPORT_OIDC_CLIENT_ID` | `mcp-passport` |
 | Redirect URL | `--oidc-redirect-url`| `MCP_PASSPORT_OIDC_REDIRECT_URL` | `http://127.0.0.1:8082/callback` |
@@ -131,6 +133,9 @@ If anything fails along the way (network, HTTP error, login), the client receive
 - A `resource_metadata` URL in a challenge is only followed if it has the same origin (scheme, host, port) as the MCP server.
 - The authorization response is checked for `state` and, when the server supports it, `iss` (RFC 9207).
 
+### Keycloak
+Tested with **Keycloak 26.8.0**. For the `mcp-passport` client enable PAR (`require.pushed.authorization.requests`), PKCE S256 and DPoP-bound access tokens; see `keycloak-realm.json`. Keycloak ignores the RFC 8707 `resource` parameter and, since 26.x, refuses token introspection by clients outside the token's audience: add an **audience mapper** for your MCP server's client, or a resource server that introspects tokens will see them as inactive.
+
 ### Logs
 Logs go to stderr and to `mcp-passport.log` in the log directory. The directory is created with mode `0700`; an existing directory that is a symlink, or that the current user does not own, is refused.
 
@@ -146,9 +151,11 @@ The project includes a comprehensive test suite, including headless browser auto
 # Run standard tests
 cargo test
 
-# Run headless browser E2E compliance test
-# (Requires Docker for Selenium/Chrome)
-cargo test --test headless_compliance_test -- --nocapture
+# MCP 2026-07-28 conformance against a strict dual-era server (no Docker)
+cargo test --test spec_2026_test
+
+# End to end with Keycloak 26.8.0 and headless Chrome (requires Docker)
+cargo test --test keycloak_2026_e2e_test -- --ignored --nocapture
 ```
 
 ### Headless Browser Testing
