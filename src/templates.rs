@@ -1,3 +1,8 @@
+//! Default pages shown in the browser after the login callback. Override them
+//! with `--template-dir`; `{{ISSUER_NAME}}`, `{{RESOURCE_NAME}}` and (failure
+//! only) `{{ERROR_MESSAGE}}` are replaced with HTML-escaped values.
+
+/// Page shown after a successful login.
 pub const DEFAULT_SUCCESS_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -97,6 +102,7 @@ pub const DEFAULT_SUCCESS_HTML: &str = r#"<!DOCTYPE html>
 </html>
 "#;
 
+/// Page shown when the login callback fails.
 pub const DEFAULT_FAILURE_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>

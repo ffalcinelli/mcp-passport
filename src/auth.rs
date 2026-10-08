@@ -379,11 +379,14 @@ impl AuthManager {
         })
     }
 
+    /// Delivers the next authorization URL to `tx` instead of opening a
+    /// browser (for automation and tests).
     pub async fn set_internal_url_tx(&self, tx: oneshot::Sender<String>) {
         let mut lock = self.internal_url_tx.lock().await;
         *lock = Some(tx);
     }
 
+    /// Reports the address the next loopback callback server binds to.
     pub async fn set_internal_callback_tx(&self, tx: oneshot::Sender<SocketAddr>) {
         let mut lock = self.internal_callback_tx.lock().await;
         *lock = Some(tx);

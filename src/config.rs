@@ -1,16 +1,26 @@
+//! # Configuration
+//!
+//! Every option is a CLI flag and an `MCP_PASSPORT_*` environment variable
+//! (flags win). See `mcp-passport --help`.
+
 use clap::{Parser, ValueEnum};
 
+/// The scheme of the `Authorization` header sent to the MCP server. The DPoP
+/// proof header is sent with either.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthScheme {
+    /// `Authorization: Bearer <token>`, as the MCP specification requires.
     #[default]
     Bearer,
+    /// `Authorization: DPoP <token>` (RFC 9449 §7.1), for servers that insist.
     Dpop,
 }
 
+/// mcp-passport's configuration.
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Config {
-    /// Remote MCP endpoint (Streamable HTTP), e.g. https://mcp.example.com/mcp
+    /// Remote MCP endpoint (the Streamable HTTP URL of the server)
     #[arg(
         long,
         env = "MCP_PASSPORT_REMOTE_MCP_URL",
@@ -157,6 +167,7 @@ pub struct Config {
 }
 
 impl Config {
+    /// Parses the process arguments and environment, exiting on errors.
     pub fn parse() -> Self {
         Parser::parse()
     }

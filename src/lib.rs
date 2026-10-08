@@ -1,3 +1,98 @@
+//! # mcp-passport
+//!
+//! A local **stdio ⇄ Streamable HTTP bridge** for the [Model Context
+//! Protocol](https://modelcontextprotocol.io). It lets AI clients that launch
+//! local MCP servers talk to remote, OAuth-protected MCP servers, with FAPI 2.0
+//! security: Pushed Authorization Requests, PKCE and DPoP-bound tokens.
+//!
+//! Most people use the `mcp-passport` binary (see the
+//! [README](https://github.com/ffalcinelli/mcp-passport#readme) and the
+//! [setup guide](https://github.com/ffalcinelli/mcp-passport/blob/main/GUIDE.md)).
+//! This crate exposes the same machinery as a library.
+//!
+//! ## How it works
+//!
+//! 1. Each JSON-RPC message read from stdin is POSTed to the MCP server, with
+//!    the headers of its protocol era. Modern (2026-07-28) messages carry
+//!    `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*`;
+//!    legacy (`initialize`-based) ones carry the negotiated version and the
+//!    session id.
+//! 2. A `401` or `403 insufficient_scope` activates the *airlock*: requests
+//!    pause while the token is refreshed or, if needed, a browser login runs:
+//!    RFC 9728 → RFC 8414 discovery, PAR with PKCE and `dpop_jkt`, `iss`
+//!    validation, and a DPoP-bound code exchange.
+//! 3. The request is retried. The response (JSON, or each event of an SSE
+//!    stream) is written to stdout. Failures become JSON-RPC errors, never
+//!    silence.
+//!
+//! ## Modules
+//!
+//! - [`proxy`]: the [`Proxy`] engine (Streamable HTTP, airlock,
+//!   DPoP, refresh).
+//! - [`auth`]: [`AuthManager`](auth::AuthManager), the OAuth flows, and
+//!   [`OidcConfig`].
+//! - [`vault`]: credential storage in the OS keychain or in memory.
+//! - [`crypto`]: DPoP keys and proofs.
+//! - [`config`]: CLI flags and environment variables.
+//! - [`logging`]: the private log directory.
+//! - [`templates`]: the default login result pages.
+//!
+//! ## Running the bridge
+//!
+//! ```no_run
+//! use mcp_passport::{config::Config, run_with_vault, vault::Vault};
+//!
+//! # async fn demo() -> anyhow::Result<()> {
+//! let config = <Config as clap::Parser>::try_parse_from([
+//!     "mcp-passport",
+//!     "--remote-mcp-url",
+//!     "https://mcp.example.com/mcp",
+//! ])?;
+//! // `run` picks the OS keychain; here credentials stay in memory.
+//! let vault = Vault::in_memory("example");
+//! run_with_vault(config, vault, tokio::io::stdin(), tokio::io::stdout()).await
+//! # }
+//! ```
+//!
+//! ## Sending a single request
+//!
+//! ```no_run
+//! use mcp_passport::auth::OidcConfig;
+//! use mcp_passport::config::AuthScheme;
+//! use mcp_passport::proxy::Proxy;
+//! use mcp_passport::vault::Vault;
+//! use serde_json::json;
+//!
+//! # async fn demo() -> anyhow::Result<()> {
+//! let proxy = Proxy::new(
+//!     "https://mcp.example.com/mcp",
+//!     "default_user",
+//!     OidcConfig {
+//!         client_id: "mcp-passport".into(),
+//!         redirect_url: "http://127.0.0.1:8082/callback".into(),
+//!         ..Default::default()
+//!     },
+//!     Vault::keyring(&mcp_passport::vault::service_name_for("https://mcp.example.com/mcp")),
+//!     "2025-11-25",
+//!     AuthScheme::Bearer,
+//! );
+//! let reply = proxy
+//!     .call(json!({
+//!         "jsonrpc": "2.0",
+//!         "id": 1,
+//!         "method": "tools/list",
+//!         "params": {"_meta": {
+//!             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+//!             "io.modelcontextprotocol/clientCapabilities": {}
+//!         }}
+//!     }))
+//!     .await?;
+//! println!("{reply:?}");
+//! # Ok(())
+//! # }
+//! ```
+#![warn(missing_docs)]
+
 pub mod auth;
 mod challenge;
 pub mod config;

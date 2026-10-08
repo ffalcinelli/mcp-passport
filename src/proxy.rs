@@ -918,6 +918,10 @@ impl Proxy {
         Ok(())
     }
 
+    /// Keeps the standalone GET event stream of a legacy server open,
+    /// reconnecting (with `Last-Event-ID`) and re-authenticating as needed,
+    /// and writes its messages to `stdout_tx`. Returns when the server
+    /// doesn't offer the stream (405).
     pub async fn listen_sse(
         &self,
         sse_url: &str,
