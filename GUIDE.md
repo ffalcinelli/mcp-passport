@@ -25,11 +25,14 @@ All variables are prefixed with `MCP_PASSPORT_`.
 | Option | Environment Variable | Description |
 |--------|----------------------|-------------|
 | Remote MCP URL | `MCP_PASSPORT_REMOTE_MCP_URL` | The JSON-RPC endpoint of your remote server. |
-| Remote SSE URL | `MCP_PASSPORT_REMOTE_SSE_URL` | The SSE endpoint for notifications. |
-| Discovery URL | `MCP_PASSPORT_OIDC_DISCOVERY_URL` | The `.well-known/openid-configuration` URL. |
+| Remote SSE URL | `MCP_PASSPORT_REMOTE_SSE_URL` | The SSE endpoint for notifications. Optional: defaults to the MCP URL (Streamable HTTP). |
+| Discovery URL | `MCP_PASSPORT_OIDC_DISCOVERY_URL` | Optional `.well-known/openid-configuration` URL. Without it, the authorization server is discovered from the MCP server (RFC 9728 → RFC 8414). |
 | Client ID | `MCP_PASSPORT_OIDC_CLIENT_ID` | Your OIDC client ID (default: `mcp-passport`). |
 | Redirect URL | `MCP_PASSPORT_OIDC_REDIRECT_URL` | Local callback URL (default: `http://127.0.0.1:8082/callback`). |
 | Template Dir | `MCP_PASSPORT_TEMPLATE_DIR` | Directory containing custom `success.html` and `failure.html`. |
+| Login timeout | `MCP_PASSPORT_AUTH_TIMEOUT_SECS` | How long to wait for the browser login (default: `300`). |
+| Log Dir | `MCP_PASSPORT_LOG_DIR` | Where `mcp-passport.log` is written (default: a private per-user directory). |
+| Allow plain HTTP | `MCP_PASSPORT_ALLOW_INSECURE_HTTP` | Accept `http://` URLs on non-loopback hosts. For development only. |
 
 ### CLI Overrides
 You can also use CLI flags (e.g., `--remote-mcp-url`) which take precedence over environment variables. Run `./mcp-passport --help` for the full list.
@@ -44,8 +47,7 @@ Edit your `claude_desktop_config.json`:
     "secure-proxy": {
       "command": "/path/to/mcp-passport",
       "env": {
-        "MCP_PASSPORT_REMOTE_MCP_URL": "https://mcp.example.com/rpc",
-        "MCP_PASSPORT_REMOTE_SSE_URL": "https://mcp.example.com/sse",
+        "MCP_PASSPORT_REMOTE_MCP_URL": "https://mcp.example.com/mcp",
         "MCP_PASSPORT_OIDC_DISCOVERY_URL": "https://auth.example.com/realms/mcp/.well-known/openid-configuration"
       }
     }
@@ -61,8 +63,7 @@ Edit your `settings.json`:
     "secure-proxy": {
       "command": "/path/to/mcp-passport",
       "env": {
-        "MCP_PASSPORT_REMOTE_MCP_URL": "https://mcp.example.com/rpc",
-        "MCP_PASSPORT_REMOTE_SSE_URL": "https://mcp.example.com/sse",
+        "MCP_PASSPORT_REMOTE_MCP_URL": "https://mcp.example.com/mcp",
         "MCP_PASSPORT_OIDC_DISCOVERY_URL": "https://auth.example.com/realms/mcp/.well-known/openid-configuration"
       },
       "trust": true
@@ -74,11 +75,15 @@ Edit your `settings.json`:
 ## 5. Troubleshooting
 
 ### Logs
-`mcp-passport` stores logs in the `logs/` directory relative to the binary's location.
-- `logs/mcp-passport.log`: Daily rotating debug logs.
+Logs are written to stderr and to `mcp-passport.log` in the log directory. The path is printed at startup. By default this is:
+- **Linux**: `$XDG_STATE_HOME/mcp-passport/logs` (usually `~/.local/state/mcp-passport/logs`)
+- **macOS**: `~/Library/Application Support/mcp-passport/logs`
+- **Windows**: `%LOCALAPPDATA%\mcp-passport\logs`
+
+Use `MCP_PASSPORT_LOG_LEVEL=debug` for more detail.
 
 ### Vault Issues
-If authentication keeps failing, you can clear the stored tokens from your system's keychain.
+If authentication keeps failing, you can clear the stored tokens from your system's keychain. Each MCP server has its own entries, named `mcp-passport:<id>` (access token), `mcp-passport:<id>-dpop` (DPoP key) and `mcp-passport:<id>-refresh` (refresh token).
 - **macOS**: Use "Keychain Access" and search for `mcp-passport`.
 - **Linux**: Use `secret-tool lookup service mcp-passport` or similar.
 - **Windows**: Use "Credential Manager".
@@ -88,11 +93,13 @@ If port `8082` is occupied, change the `MCP_PASSPORT_OIDC_REDIRECT_URL` (e.g., t
 
 ## 6. How the "Airlock" Works
 When you send a request and your token is missing or expired:
-1. `mcp-passport` detects the `401` or missing token.
-2. It suspends all outgoing requests.
-3. Your default browser opens automatically to the login page.
-4. Once you log in, `mcp-passport` captures the code, exchanges it for a DPoP-bound token, and stores it securely.
+1. `mcp-passport` detects the `401` (or a `403 insufficient_scope` step-up challenge).
+2. It suspends all outgoing requests. Requests rejected at the same time share one re-authentication.
+3. For an expired token it first tries a silent refresh with the stored, DPoP-bound refresh token.
+4. Otherwise your default browser opens to the login page. Once you log in, `mcp-passport` captures the code, exchanges it for a DPoP-bound token, and stores it securely.
 5. The suspended requests are automatically resumed and signed with the new credentials.
+
+If the login fails (you deny access, the provider returns an error, or the timeout expires), the waiting requests get a JSON-RPC error. If a freshly issued token is rejected again right away, `mcp-passport` reports an authentication loop instead of reopening the browser.
 
 ## 7. Customizing Landing Pages
 By default, `mcp-passport` provides a clean, modern "Authentication Successful" or "Authentication Failed" page. You can customize these by providing a directory with your own HTML files:
