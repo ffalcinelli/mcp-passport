@@ -52,6 +52,8 @@ pub struct Proxy {
     reauth_count: Arc<std::sync::atomic::AtomicU64>,
     /// Set once a POST to the remote server has succeeded.
     connected_tx: watch::Sender<bool>,
+    /// Latest DPoP nonce provided by the remote server (RFC 9449 §9).
+    rs_nonce: std::sync::Mutex<Option<String>>,
 }
 
 /// A fresh token rejected within this window means re-authenticating again
@@ -156,6 +158,7 @@ impl Proxy {
             reauth_state: Mutex::new(ReauthState::default()),
             reauth_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             connected_tx: watch::channel(false).0,
+            rs_nonce: std::sync::Mutex::new(None),
         })
     }
 
@@ -175,6 +178,25 @@ impl Proxy {
                 Ok(None)
             }
         }
+    }
+
+    /// Remembers the server's `DPoP-Nonce`, if it sent one. Returns whether it did.
+    fn update_rs_nonce(&self, headers: &reqwest::header::HeaderMap) -> bool {
+        match crate::crypto::dpop_nonce(headers) {
+            Some(n) => {
+                if let Ok(mut slot) = self.rs_nonce.lock() {
+                    *slot = Some(n);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether a response asks for a (new) DPoP nonce (RFC 9449 §9).
+    fn wants_dpop_nonce(status: StatusCode, headers: &reqwest::header::HeaderMap) -> bool {
+        status == StatusCode::UNAUTHORIZED
+            && WwwAuthenticate::parse(headers).has_error("use_dpop_nonce")
     }
 
     /// The current credential generation.
@@ -228,7 +250,9 @@ impl Proxy {
             .header("MCP-Protocol-Version", &self.protocol_version);
 
         if let Some(Credentials { token, key }) = credentials {
-            let dpop_proof = key.generate_proof_with_ath(method.as_str(), url, Some(token))?;
+            let nonce = self.rs_nonce.lock().ok().and_then(|n| n.clone());
+            let dpop_proof =
+                key.generate_proof_with_ath(method.as_str(), url, Some(token), nonce.as_deref())?;
             let auth_header = match self.auth_scheme {
                 AuthScheme::Bearer => format!("Bearer {}", token),
                 AuthScheme::Dpop => format!("DPoP {}", token),
@@ -319,6 +343,7 @@ impl Proxy {
         let mut retry_count = 0;
         let mut loaded_gen: Option<u64> = None;
         let mut credentials = None;
+        let mut nonce_retried = false;
 
         let response = loop {
             if retry_count > max_retries {
@@ -334,6 +359,16 @@ impl Proxy {
             }
 
             let response = self.execute_request(credentials.as_ref(), &payload).await?;
+            let got_nonce = self.update_rs_nonce(response.headers());
+            if Self::wants_dpop_nonce(response.status(), response.headers()) {
+                // Not an auth failure: resend once with the nonce, outside the airlock.
+                if got_nonce && !nonce_retried {
+                    info!("Remote server requires a DPoP nonce; retrying.");
+                    nonce_retried = true;
+                    continue;
+                }
+                anyhow::bail!("Remote server rejected the DPoP nonce (use_dpop_nonce)");
+            }
             if self.handle_auth_challenge(&response, gen).await? {
                 retry_count += 1;
                 continue;
@@ -564,6 +599,7 @@ impl Proxy {
         let mut loaded_gen: Option<u64> = None;
         let mut credentials = None;
         let mut last_event_id: Option<String> = None;
+        let mut reconnect_now = false;
 
         loop {
             self.wait_for_airlock().await?;
@@ -598,9 +634,24 @@ impl Proxy {
                             let _ = stdout_tx.send(message.data).await;
                         }
                     }
-                    Ok(reqwest_eventsource::Event::Open) => info!("SSE connection established"),
+                    Ok(reqwest_eventsource::Event::Open) => {
+                        info!("SSE connection established");
+                        reconnect_now = false;
+                    }
                     Err(reqwest_eventsource::Error::InvalidStatusCode(status, resp)) => {
                         source.close();
+                        let got_nonce = self.update_rs_nonce(resp.headers());
+                        if Self::wants_dpop_nonce(status, resp.headers()) {
+                            // Retry once right away with the new nonce.
+                            reconnect_now = got_nonce && !reconnect_now;
+                            if reconnect_now {
+                                info!("SSE endpoint requires a DPoP nonce; reconnecting.");
+                            } else {
+                                error!("SSE endpoint rejected the DPoP nonce (use_dpop_nonce).");
+                            }
+                            break;
+                        }
+                        reconnect_now = false;
                         match status {
                             StatusCode::UNAUTHORIZED => {
                                 warn!(
@@ -644,6 +695,9 @@ impl Proxy {
                 }
             }
 
+            if reconnect_now {
+                continue;
+            }
             let t = &self.oidc_config.timeouts;
             let jitter_max = t.sse_retry_jitter.as_millis().max(1) as u64;
             let delay = t.sse_retry_base

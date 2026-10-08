@@ -34,6 +34,9 @@ struct DpopClaims {
     iat: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     ath: Option<String>,
+    /// Server-provided nonce (RFC 9449 §8, §9).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
 }
 
 impl DpopKey {
@@ -71,15 +74,17 @@ impl DpopKey {
     /// Generates a DPoP Proof JWT for a given HTTP method and URL.
     /// Optional access_token can be provided to include 'ath' claim.
     pub fn generate_proof(&self, htm: &str, htu: &str) -> Result<String> {
-        self.generate_proof_with_ath(htm, htu, None)
+        self.generate_proof_with_ath(htm, htu, None, None)
     }
 
-    /// Generates a DPoP Proof JWT with an access token hash (ath).
+    /// Generates a DPoP Proof JWT, optionally with an access token hash (`ath`)
+    /// and a server-provided `nonce`.
     pub fn generate_proof_with_ath(
         &self,
         htm: &str,
         htu: &str,
         access_token: Option<&str>,
+        nonce: Option<&str>,
     ) -> Result<String> {
         let jwk = self.public_jwk()?;
 
@@ -103,6 +108,7 @@ impl DpopKey {
             htu: normalize_htu(htu),
             iat: now,
             ath,
+            nonce: nonce.map(str::to_string),
         };
 
         let header_str = serde_json::to_string(&header)?;
@@ -129,6 +135,15 @@ impl DpopKey {
 
         Ok(final_jwt)
     }
+}
+
+/// The `DPoP-Nonce` response header, if present (RFC 9449 §8.1).
+pub fn dpop_nonce(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// The `htu` claim is the target URI without query and fragment (RFC 9449 §4.2).
@@ -258,11 +273,31 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_proof_with_nonce() -> Result<()> {
+        let key = DpopKey::generate();
+        let decode = |proof: String| -> Result<Value> {
+            let claims = proof.split('.').nth(1).unwrap().to_string();
+            Ok(serde_json::from_slice(&URL_SAFE_NO_PAD.decode(claims)?)?)
+        };
+
+        let with =
+            decode(key.generate_proof_with_ath("POST", "https://as/token", None, Some("n-1"))?)?;
+        assert_eq!(with["nonce"], "n-1");
+        let without = decode(key.generate_proof("POST", "https://as/token")?)?;
+        assert!(without.get("nonce").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn test_generate_proof_with_ath() -> Result<()> {
         let key = DpopKey::generate();
         let access_token = "test_token";
-        let proof =
-            key.generate_proof_with_ath("GET", "https://api.example.com/sse", Some(access_token))?;
+        let proof = key.generate_proof_with_ath(
+            "GET",
+            "https://api.example.com/sse",
+            Some(access_token),
+            None,
+        )?;
         let parts: Vec<&str> = proof.split('.').collect();
         assert_eq!(parts.len(), 3);
 

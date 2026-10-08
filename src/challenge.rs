@@ -64,6 +64,13 @@ impl WwwAuthenticate {
         self.param("error")
     }
 
+    /// Whether any challenge carries `error=<code>`.
+    pub fn has_error(&self, code: &str) -> bool {
+        self.challenges
+            .iter()
+            .any(|c| c.param("error") == Some(code))
+    }
+
     /// The space-separated `scope` parameter, split into scopes.
     pub fn scope(&self) -> Option<Vec<String>> {
         self.param("scope")
@@ -315,6 +322,8 @@ mod tests {
         assert_eq!(auth.challenges[1].scheme, "DPoP");
         assert_eq!(auth.challenges[1].param("error"), Some("use_dpop_nonce"));
         assert_eq!(auth.challenges[1].param("algs"), Some("ES256"));
+        assert!(auth.has_error("use_dpop_nonce"));
+        assert!(!auth.has_error("invalid_token"));
     }
 
     #[test]

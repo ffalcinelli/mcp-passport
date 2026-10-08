@@ -169,6 +169,8 @@ pub struct AuthManager {
     issuer: Option<String>,
     /// Whether the AS always returns `iss` in the authorization response (RFC 9207).
     iss_required: bool,
+    /// Latest DPoP nonce provided by the authorization server (RFC 9449 §8).
+    as_nonce: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Query parameters of the authorization response (RFC 6749 §4.1.2, RFC 9207).
@@ -313,6 +315,7 @@ impl AuthManager {
             timeouts: oidc_config.timeouts,
             issuer,
             iss_required,
+            as_nonce: Arc::default(),
         })
     }
 
@@ -628,26 +631,56 @@ impl AuthManager {
 
     /// POSTs to the token endpoint with a DPoP proof. The outer error is a
     /// transport failure; the inner one is the endpoint's error response.
+    ///
+    /// If the AS demands a DPoP nonce (`use_dpop_nonce`), the request is
+    /// retried once with the nonce it supplied (RFC 9449 §8).
     async fn token_request(
         &self,
         params: &[(&str, &str)],
         dpop_key: &DpopKey,
     ) -> Result<std::result::Result<TokenResponse, String>> {
-        let dpop_proof = dpop_key.generate_proof("POST", &self.token_url)?;
-        let res = self
-            .http_client
-            .post(&self.token_url)
-            .header("DPoP", dpop_proof)
-            .form(params)
-            .send()
-            .await?;
+        let mut retried = false;
+        let res = loop {
+            let nonce = self.as_nonce.lock().ok().and_then(|n| n.clone());
+            let dpop_proof = dpop_key.generate_proof_with_ath(
+                "POST",
+                &self.token_url,
+                None,
+                nonce.as_deref(),
+            )?;
+            let res = self
+                .http_client
+                .post(&self.token_url)
+                .header("DPoP", dpop_proof)
+                .form(params)
+                .send()
+                .await?;
+            let new_nonce = crate::crypto::dpop_nonce(res.headers());
+            if let Some(n) = &new_nonce {
+                if let Ok(mut slot) = self.as_nonce.lock() {
+                    *slot = Some(n.clone());
+                }
+            }
+            if res.status().is_success() {
+                break res;
+            }
 
-        if !res.status().is_success() {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
+            let wants_nonce = status == reqwest::StatusCode::BAD_REQUEST
+                && serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                    .as_deref()
+                    == Some("use_dpop_nonce");
+            if wants_nonce && new_nonce.is_some() && !retried {
+                info!("Authorization server requires a DPoP nonce; retrying.");
+                retried = true;
+                continue;
+            }
             error!("Token endpoint returned {}: {}", status, body);
             return Ok(Err(format!("{status}: {body}")));
-        }
+        };
 
         let tokens: TokenResponse = res.json().await.context("Invalid token response")?;
         match tokens.token_type.as_deref() {
@@ -884,6 +917,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
 
         let (tx, _rx) = oneshot::channel::<SocketAddr>();
@@ -1199,6 +1233,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
         let err = am.reauthenticate("user", None, None).await.unwrap_err();
         assert!(err.to_string().contains("RFC 8252"), "{err}");
@@ -1228,6 +1263,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
         assert!(am.reauthenticate("user", None, None).await.is_err());
         assert_eq!(vault.get_dpop_key("user").unwrap(), Some(vec![7u8; 32]));
@@ -1292,6 +1328,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
 
         let (tx, _rx) = oneshot::channel::<String>();
@@ -1321,6 +1358,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
         am.vault.store_token("user", "token")?;
 
@@ -1423,6 +1461,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
         let key = crate::crypto::DpopKey::generate();
         let res = am
@@ -1455,6 +1494,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
 
         // This should fail after 5 retries because the port is occupied by 'listener'
@@ -1496,6 +1536,7 @@ mod tests {
             timeouts: Timeouts::fast(),
             issuer: None,
             iss_required: false,
+            as_nonce: Arc::default(),
         };
 
         // Mock PAR response
