@@ -317,7 +317,10 @@ impl AuthManager {
             .await?;
 
         // 5. Direct user to Auth URL
-        self.open_auth_url(&par_data, url_tx).await;
+        if let Err(e) = self.open_auth_url(&par_data, url_tx).await {
+            server_handle.abort();
+            return Err(e);
+        }
 
         // 6. Wait for code from callback
         let code = match tokio::time::timeout(self.timeouts.auth, rx).await {
@@ -448,11 +451,12 @@ impl AuthManager {
         Ok(par_data)
     }
 
-    async fn open_auth_url(&self, par_data: &ParResponse, url_tx: Option<oneshot::Sender<String>>) {
-        let auth_url = format!(
-            "{}?client_id={}&response_type=code&request_uri={}",
-            self.auth_url, self.client_id, par_data.request_uri
-        );
+    async fn open_auth_url(
+        &self,
+        par_data: &ParResponse,
+        url_tx: Option<oneshot::Sender<String>>,
+    ) -> Result<()> {
+        let auth_url = build_authorize_url(&self.auth_url, &self.client_id, &par_data.request_uri)?;
 
         eprintln!(
             "{}",
@@ -481,8 +485,7 @@ impl AuthManager {
 
         if !skip_open && !has_listener {
             let is_safe_url = url::Url::parse(&auth_url)
-                .map(|u| u.scheme() == "http" || u.scheme() == "https")
-                .unwrap_or(false);
+                .is_ok_and(|u| u.scheme() == "http" || u.scheme() == "https");
 
             if is_safe_url {
                 if let Err(e) = open::that(&auth_url) {
@@ -507,7 +510,9 @@ impl AuthManager {
                 let _ = tx_url.send(auth_url.clone());
             }
         }
+        Ok(())
     }
+
     async fn manual_token_exchange(
         &self,
         user_id: &str,
@@ -543,9 +548,18 @@ impl AuthManager {
         #[derive(Deserialize)]
         struct TokenSuccess {
             access_token: String,
+            token_type: Option<String>,
         }
 
         let data: TokenSuccess = res.json().await?;
+        match data.token_type.as_deref() {
+            Some(t) if t.eq_ignore_ascii_case("DPoP") => {}
+            other => warn!(
+                "Token endpoint returned token_type {:?} instead of \"DPoP\": the token is not \
+                 bound to the DPoP key (RFC 9449 §5).",
+                other
+            ),
+        }
         self.vault.store_token(user_id, &data.access_token)?;
         info!("Successfully acquired and stored DPoP-bound token.");
 
@@ -606,6 +620,18 @@ async fn handle_callback(
     }
 }
 
+/// Builds the authorization URL for a PAR `request_uri` (RFC 9126 §4),
+/// keeping any query the endpoint already has.
+fn build_authorize_url(auth_endpoint: &str, client_id: &str, request_uri: &str) -> Result<String> {
+    let mut url = url::Url::parse(auth_endpoint)
+        .with_context(|| format!("Invalid authorization endpoint '{auth_endpoint}'"))?;
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("response_type", "code")
+        .append_pair("request_uri", request_uri);
+    Ok(url.into())
+}
+
 /// Returns `len` bytes from the OS CSPRNG, base64url-encoded without padding.
 fn random_urlsafe(len: usize) -> String {
     let mut buf = vec![0u8; len];
@@ -639,6 +665,22 @@ fn render_template(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_build_authorize_url_encodes_and_keeps_query() {
+        let url = build_authorize_url(
+            "https://as.example.com/authorize?tenant=a",
+            "my client&x=1",
+            "urn:ietf:params:oauth:request_uri:abc",
+        )
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://as.example.com/authorize?tenant=a&client_id=my+client%26x%3D1\
+             &response_type=code&request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Aabc"
+        );
+        assert!(build_authorize_url("not a url", "c", "r").is_err());
+    }
 
     #[test]
     fn test_pkce_s256_challenge() {

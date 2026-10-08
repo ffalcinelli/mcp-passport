@@ -100,7 +100,7 @@ impl DpopKey {
         let claims = DpopClaims {
             jti: Uuid::new_v4().to_string(),
             htm: htm.to_string(),
-            htu: htu.to_string(),
+            htu: normalize_htu(htu),
             iat: now,
             ath,
         };
@@ -131,9 +131,34 @@ impl DpopKey {
     }
 }
 
+/// The `htu` claim is the target URI without query and fragment (RFC 9449 §4.2).
+fn normalize_htu(htu: &str) -> String {
+    match url::Url::parse(htu) {
+        Ok(mut u) if u.query().is_some() || u.fragment().is_some() => {
+            u.set_query(None);
+            u.set_fragment(None);
+            u.into()
+        }
+        _ => htu.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_htu() {
+        assert_eq!(
+            normalize_htu("https://api.example.com/rpc?session=1#frag"),
+            "https://api.example.com/rpc"
+        );
+        assert_eq!(
+            normalize_htu("https://api.example.com/rpc"),
+            "https://api.example.com/rpc"
+        );
+        assert_eq!(normalize_htu("not a url"), "not a url");
+    }
 
     #[test]
     fn test_dpop_key_generate_and_bytes() -> Result<()> {
