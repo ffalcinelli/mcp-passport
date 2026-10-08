@@ -778,7 +778,7 @@ mod tests {
             oidc_config.clone(),
             service,
             protocol_version,
-            auth_scheme.clone(),
+            auth_scheme,
         );
 
         assert_eq!(proxy.remote_url, remote_url);

@@ -211,7 +211,6 @@ mod tests {
     #[tokio::test]
     async fn test_process_message_with_id() -> Result<()> {
         let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
-        let _test_lock = crate::vault::TEST_MUTEX.lock().unwrap();
         std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
 
         let (tx, mut rx) = mpsc::channel(1);

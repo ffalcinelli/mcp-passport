@@ -19,13 +19,12 @@ use axum::{
     routing::get,
     Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use colored::Colorize;
-use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, TokenUrl,
-};
+use rand_core::{OsRng, RngCore};
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -258,9 +257,9 @@ impl AuthManager {
         self.vault.store_dpop_key(user_id, &dpop_key.to_bytes())?;
 
         // 2. Prepare PKCE and State
-        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        let csrf_token = CsrfToken::new_random();
-        let state_val = csrf_token.secret().clone();
+        let pkce_verifier = random_urlsafe(32);
+        let pkce_challenge = pkce_s256_challenge(&pkce_verifier);
+        let state_val = random_urlsafe(16);
 
         // 3. Setup Loopback Server to catch the callback
         let expected_state = state_val.clone();
@@ -268,7 +267,7 @@ impl AuthManager {
 
         // 4. Pushed Authorization Request (PAR)
         let par_data = self
-            .perform_par_request(pkce_challenge.as_str(), &state_val, scopes, &server_handle)
+            .perform_par_request(&pkce_challenge, &state_val, scopes, &server_handle)
             .await?;
 
         // 5. Direct user to Auth URL
@@ -291,20 +290,8 @@ impl AuthManager {
 
         // 7. Token Exchange with DPoP
         info!("Step 2: Exchanging code for DPoP-bound token...");
-        let _oauth_client = BasicClient::new(ClientId::new(self.client_id.clone()))
-            .set_auth_uri(AuthUrl::new(self.auth_url.clone())?)
-            .set_token_uri(TokenUrl::new(self.token_url.clone())?)
-            .set_redirect_uri(RedirectUrl::new(self.redirect_url.clone())?);
-
-        // We use manual token exchange because FAPI 2.0 requires DPoP in headers,
-        // which the oauth2 crate doesn't natively support yet for the exchange_code call.
-        self.manual_token_exchange(
-            user_id,
-            &AuthorizationCode::new(code),
-            &pkce_verifier,
-            &dpop_key,
-        )
-        .await?;
+        self.manual_token_exchange(user_id, &code, &pkce_verifier, &dpop_key)
+            .await?;
 
         Ok(())
     }
@@ -488,8 +475,8 @@ impl AuthManager {
     async fn manual_token_exchange(
         &self,
         user_id: &str,
-        code: &AuthorizationCode,
-        pkce_verifier: &PkceCodeVerifier,
+        code: &str,
+        pkce_verifier: &str,
         dpop_key: &DpopKey,
     ) -> Result<()> {
         let dpop_proof = dpop_key.generate_proof("POST", &self.token_url)?;
@@ -497,9 +484,9 @@ impl AuthManager {
         let params = vec![
             ("grant_type", "authorization_code"),
             ("client_id", self.client_id.as_str()),
-            ("code", code.secret().as_str()),
+            ("code", code),
             ("redirect_uri", self.redirect_url.as_str()),
-            ("code_verifier", pkce_verifier.secret().as_str()),
+            ("code_verifier", pkce_verifier),
             ("resource", self.resource.as_str()),
         ];
 
@@ -583,6 +570,18 @@ async fn handle_callback(
     }
 }
 
+/// Returns `len` bytes from the OS CSPRNG, base64url-encoded without padding.
+fn random_urlsafe(len: usize) -> String {
+    let mut buf = vec![0u8; len];
+    OsRng.fill_bytes(&mut buf);
+    URL_SAFE_NO_PAD.encode(buf)
+}
+
+/// PKCE S256 code challenge (RFC 7636 §4.2).
+fn pkce_s256_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
 fn escape_html(s: &str) -> String {
     html_escape::encode_safe(s).to_string()
 }
@@ -604,6 +603,25 @@ fn render_template(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pkce_s256_challenge() {
+        // RFC 7636 Appendix B test vector
+        assert_eq!(
+            pkce_s256_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn test_random_urlsafe() {
+        let a = random_urlsafe(32);
+        assert_eq!(a.len(), 43); // RFC 7636 verifier length for 32 bytes
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert_ne!(a, random_urlsafe(32));
+    }
 
     #[test]
     fn test_escape_html() {
@@ -881,10 +899,8 @@ mod tests {
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
         };
         let key = crate::crypto::DpopKey::generate();
-        let code = AuthorizationCode::new("code".to_string());
-        let verifier = PkceCodeVerifier::new("verifier".to_string());
         let res = am
-            .manual_token_exchange("user", &code, &verifier, &key)
+            .manual_token_exchange("user", "code", "verifier", &key)
             .await;
         assert!(res.is_err());
         Ok(())

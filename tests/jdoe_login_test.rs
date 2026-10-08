@@ -231,7 +231,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
 
     let client = ClientBuilder::native()
         .capabilities(caps)
-        .connect(&chrome_url)
+        .connect(chrome_url)
         .await?;
     client.goto(&auth_url).await?;
 

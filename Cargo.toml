@@ -26,7 +26,6 @@ reqwest-eventsource = "0.6"
 url = "2.5"
 
 # Security & Auth
-oauth2 = { version = "5.0", features = ["reqwest"] }
 keyring = { version = "3.1", features = ["linux-native"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 rand_core = { version = "0.6", features = ["std"] }

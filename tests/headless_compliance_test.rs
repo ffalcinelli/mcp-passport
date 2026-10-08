@@ -237,7 +237,7 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
 
     let client = ClientBuilder::native()
         .capabilities(caps)
-        .connect(&chrome_url)
+        .connect(chrome_url)
         .await?;
     client.goto(&auth_url).await?;
 

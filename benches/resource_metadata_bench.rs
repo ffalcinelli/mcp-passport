@@ -1,8 +1,8 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 
-fn unoptimized_logic(resource: &String) -> String {
+fn unoptimized_logic(resource: &str) -> String {
     // Simulate failing condition returning default
-    resource.clone()
+    resource.to_string()
 }
 
 fn optimized_logic(resource: String) -> String {

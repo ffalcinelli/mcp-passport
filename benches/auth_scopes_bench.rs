@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 fn scopes_original(scopes: Option<Vec<String>>) -> String {
     let mut s_vec = if let Some(ref s) = scopes {

@@ -192,7 +192,7 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
 
     let client = ClientBuilder::native()
         .capabilities(caps)
-        .connect(&chrome_url)
+        .connect(chrome_url)
         .await?;
     client.goto(&auth_url).await?;
 

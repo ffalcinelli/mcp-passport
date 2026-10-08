@@ -19,7 +19,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     });
 
     let cached_token = vault.get_token("bench_user").unwrap();
-    let cached_dpop_key = vault.get_dpop_key("bench_user").unwrap();
+    let _cached_dpop_key = vault.get_dpop_key("bench_user").unwrap();
 
     c.bench_function("vault_cached_clone", |b| {
         b.iter(|| {
