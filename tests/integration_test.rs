@@ -1,3 +1,5 @@
+mod common;
+
 use axum::http::HeaderMap;
 use axum::{routing::post, Json, Router};
 use mcp_passport::auth::OidcConfig;
@@ -6,9 +8,7 @@ use mcp_passport::crypto::DpopKey;
 use mcp_passport::proxy::Proxy;
 use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::time::Duration;
-use testcontainers::{core::Mount, core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::time::timeout;
 use tracing::info;
@@ -49,7 +49,6 @@ async fn mock_mcp_handler(headers: HeaderMap, Json(payload): Json<Value>) -> Jso
 #[ignore]
 async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
     // Ensure we use the memory vault and skip browser for reliability in all environments
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
 
     // 1. Setup tracing
@@ -59,26 +58,8 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         .try_init();
 
     // 2. Start Keycloak using Testcontainers
-    let realm_path = std::env::current_dir()?.join("keycloak-realm.json");
-    let realm_path_str = realm_path.to_str().unwrap();
-
-    let keycloak_img = GenericImage::new("quay.io/keycloak/keycloak", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Listening on:"))
-        .with_env_var("KEYCLOAK_ADMIN", "admin")
-        .with_env_var("KEYCLOAK_ADMIN_PASSWORD", "admin")
-        .with_mount(Mount::bind_mount(
-            realm_path_str,
-            "/opt/keycloak/data/import/realm.json",
-        ))
-        .with_cmd(["start-dev", "--import-realm"]);
-
-    let keycloak_container = keycloak_img
-        .start()
-        .await
-        .expect("Failed to start Keycloak");
-
-    let keycloak_port = keycloak_container.get_host_port_ipv4(8080).await?;
-    let keycloak_base = format!("http://127.0.0.1:{}", keycloak_port);
+    let keycloak = common::start_keycloak().await?;
+    let keycloak_base = keycloak.base.clone();
     let realm_base = format!("{}/realms/mcp", keycloak_base);
     let oidc_base = format!("{}/protocol/openid-connect", realm_base);
 
@@ -97,29 +78,26 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
 
     // 4. Seed the vault for test_user
     let test_svc = "mcp-passport-keycloak-integration-v10";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token("test_user_kc", "test_access_token")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key("test_user_kc", &dpop_key.to_bytes())?;
 
     // 5. Initialize OidcConfig and Proxy
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "mcp-passport".into(),
         redirect_url: "http://127.0.0.1:8082/callback".into(),
         auth_url_override: Some(format!("{}/auth", oidc_base)),
         token_url_override: Some(format!("{}/token", oidc_base)),
         par_url_override: Some(format!("{}/par", oidc_base)),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &mock_url,
         "test_user_kc",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Dpop,
     );
@@ -135,8 +113,9 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         while let Ok(Some(line)) = reader.next_line().await {
             let p = proxy_task.clone();
             if let Ok(payload) = serde_json::from_str::<Value>(&line) {
-                match p.handle_request(payload).await {
-                    Ok(response) => {
+                match p.call(payload).await {
+                    Ok(None) => {}
+                    Ok(Some(response)) => {
                         let res_line = format!("{}\n", serde_json::to_string(&response).unwrap());
                         let _ = writer.write_all(res_line.as_bytes()).await;
                         let _ = writer.flush().await;

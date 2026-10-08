@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mcp-passport</title>
+  <meta name="description" content="A local stdio bridge that connects AI clients to OAuth-protected remote MCP servers, with FAPI 2.0 security: PAR, PKCE and DPoP-bound tokens.">
+  <meta property="og:title" content="mcp-passport">
+  <meta property="og:description" content="Connect AI clients to OAuth-protected MCP servers with DPoP-bound tokens, spec-compliant discovery and silent re-authentication.">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#0f6b5c">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./" aria-label="mcp-passport home">
+        <svg viewBox="0 0 32 32" aria-hidden="true">
+          <path class="shield" d="M16 2.5 4.5 7v8.2c0 7.1 4.9 12.4 11.5 14.3 6.6-1.9 11.5-7.2 11.5-14.3V7L16 2.5Z"/>
+          <circle class="keyhole" cx="16" cy="13.5" r="3.4"/>
+          <path class="keyhole" d="M14.4 15.8h3.2l1 6.2h-5.2l1-6.2Z"/>
+        </svg>
+        mcp-passport
+      </a>
+      <nav class="site-nav" aria-label="Main">
+        <a class="optional" href="#features">Features</a>
+        <a class="optional" href="#how-it-works">How it works</a>
+        <a class="optional" href="#quick-start">Quick start</a>
+        <a class="optional" href="#security">Security</a>
+        <a href="latest/mcp_passport/">API docs</a>
+        <a href="https://github.com/ffalcinelli/mcp-passport">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      <section class="hero" aria-labelledby="hero-title">
+        <ul class="eyebrow" aria-label="Highlights">
+          <li>MCP 2026-07-28</li>
+          <li>FAPI 2.0 · DPoP</li>
+          <li>Tested with Keycloak 26.8.0</li>
+          <li>MIT</li>
+        </ul>
+        <h1 id="hero-title">Connect AI clients to protected MCP servers, without bearer tokens to steal.</h1>
+        <p class="lead">
+          <strong>mcp-passport</strong> is a local stdio bridge to remote, OAuth-protected
+          <a href="https://modelcontextprotocol.io">Model Context Protocol</a> servers. It discovers the
+          authorization server, logs you in through your browser, binds every token to a key that
+          never leaves your machine, and keeps you logged in, all invisible to your AI client.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="#quick-start">Get started</a>
+          <a class="button" href="latest/mcp_passport/">API docs</a>
+          <a class="button" href="https://github.com/ffalcinelli/mcp-passport">View on GitHub</a>
+        </div>
+      </section>
+
+      <section id="why" aria-labelledby="why-title">
+        <h2 id="why-title">Why mcp-passport</h2>
+        <p class="section-lead">
+          Remote MCP servers protect their tools with OAuth, but many clients only speak stdio, and few
+          OAuth clients use sender-constrained tokens. mcp-passport closes that gap.
+        </p>
+        <div class="grid">
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            </div>
+            <h3>No bearer tokens to steal</h3>
+            <p>Access tokens are bound to a P-256 key generated for each login (DPoP). A leaked token is useless without the key.</p>
+          </article>
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            </div>
+            <h3>Just the server URL</h3>
+            <p>The authorization server is discovered from the MCP server's protected resource metadata, as the MCP specification describes.</p>
+          </article>
+          <article class="card">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
+            </div>
+            <h3>Invisible re-authentication</h3>
+            <p>Tokens are refreshed silently, even before they expire. When a login is needed, requests wait and then resume.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="features" aria-labelledby="features-title">
+        <h2 id="features-title">Features</h2>
+        <p class="section-lead">Built against the specifications, and tested against a strict MCP 2026-07-28 server and a real Keycloak.</p>
+        <div class="grid">
+          <article class="card">
+            <h3>Dual-era MCP</h3>
+            <p>Forwards MCP 2026-07-28 clients (per-request <code>_meta</code>) and legacy <code>initialize</code> clients, each with the HTTP rules of its revision.</p>
+          </article>
+          <article class="card">
+            <h3>Streamable HTTP, done right</h3>
+            <p>JSON and SSE responses, <code>Mcp-Method</code> / <code>Mcp-Name</code> headers, <code>x-mcp-header</code> mirroring, <code>subscriptions/listen</code> and cancellation by closing the stream.</p>
+          </article>
+          <article class="card">
+            <h3>FAPI 2.0 login</h3>
+            <p>Pushed Authorization Requests, PKCE S256, resource indicators, <code>dpop_jkt</code>, and RFC 9207 <code>iss</code> checks on the callback.</p>
+          </article>
+          <article class="card">
+            <h3>Refresh and step-up</h3>
+            <p>Silent and proactive refresh with DPoP-bound refresh tokens. A <code>403 insufficient_scope</code> triggers a step-up login that keeps earlier scopes.</p>
+          </article>
+          <article class="card">
+            <h3>OS keychain</h3>
+            <p>macOS Keychain, Windows Credential Manager, or the Linux Secret Service. Credentials are scoped per MCP server and bound to their issuer.</p>
+          </article>
+          <article class="card">
+            <h3>Never leaves the client hanging</h3>
+            <p>Network errors, HTTP errors and failed logins come back as JSON-RPC errors for the request. Authentication loops are detected, not repeated.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="how-it-works" aria-labelledby="how-title">
+        <h2 id="how-title">How it works</h2>
+        <p class="section-lead">Your AI client starts mcp-passport like any local MCP server. Everything else happens behind the stdio pipe.</p>
+        <figure class="diagram">
+          <svg viewBox="0 0 880 300" role="img" aria-labelledby="diagram-title diagram-desc">
+            <title id="diagram-title">mcp-passport architecture</title>
+            <desc id="diagram-desc">The AI client talks JSON-RPC over stdio to mcp-passport. mcp-passport talks HTTPS with DPoP proofs to the MCP server, keeps credentials in the OS keychain, and uses the authorization server for discovery, login and refresh. The MCP server points to its authorization server through RFC 9728 metadata.</desc>
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path class="arrowhead" d="M0 0 10 5 0 10z"/>
+              </marker>
+            </defs>
+
+            <line class="edge" x1="192" y1="75" x2="331" y2="75" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+            <text class="edge-label" x="262" y="62" text-anchor="middle">stdio · JSON-RPC</text>
+
+            <line class="edge" x1="547" y1="75" x2="686" y2="75" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+            <text class="edge-label" x="617" y="62" text-anchor="middle">HTTPS + DPoP</text>
+
+            <line class="edge" x1="440" y1="112" x2="440" y2="196" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+            <text class="edge-label" x="452" y="158">credentials</text>
+
+            <line class="edge" x1="547" y1="100" x2="686" y2="215" marker-end="url(#arrow)"/>
+            <text class="edge-label" x="616" y="150" text-anchor="middle" transform="rotate(39.6 616 150)">discovery · login · refresh</text>
+
+            <line class="edge" x1="775" y1="112" x2="775" y2="196" stroke-dasharray="5 5" marker-end="url(#arrow)"/>
+            <text class="edge-label" x="787" y="158">RFC 9728</text>
+
+            <g class="node">
+              <rect x="20" y="40" width="170" height="70" rx="12"/>
+              <text x="105" y="70" text-anchor="middle">AI client</text>
+              <text class="sub" x="105" y="91" text-anchor="middle">Claude, Gemini CLI, …</text>
+            </g>
+            <g class="node main">
+              <rect x="333" y="40" width="214" height="70" rx="12"/>
+              <text x="440" y="70" text-anchor="middle">mcp-passport</text>
+              <text class="sub" x="440" y="91" text-anchor="middle">local bridge · airlock</text>
+            </g>
+            <g class="node">
+              <rect x="688" y="40" width="172" height="70" rx="12"/>
+              <text x="774" y="70" text-anchor="middle">MCP server</text>
+              <text class="sub" x="774" y="91" text-anchor="middle">Streamable HTTP</text>
+            </g>
+            <g class="node">
+              <rect x="333" y="198" width="214" height="70" rx="12"/>
+              <text x="440" y="228" text-anchor="middle">OS keychain</text>
+              <text class="sub" x="440" y="249" text-anchor="middle">token · DPoP key · refresh</text>
+            </g>
+            <g class="node">
+              <rect x="688" y="198" width="172" height="70" rx="12"/>
+              <text x="774" y="228" text-anchor="middle">Authorization server</text>
+              <text class="sub" x="774" y="249" text-anchor="middle">PAR · PKCE · DPoP</text>
+            </g>
+          </svg>
+        </figure>
+        <p class="diagram-hint">Scroll the diagram sideways to see all of it.</p>
+        <ol class="steps">
+          <li>Your client sends a JSON-RPC request on stdio; mcp-passport forwards it with a DPoP proof and the headers of its MCP revision.</li>
+          <li>The server answers <code>401</code>: requests pause in the <em>airlock</em> while mcp-passport finds the authorization server through RFC 9728 and RFC 8414 metadata.</li>
+          <li>If a refresh token exists, it is used silently. Otherwise your browser opens a PAR-based login with PKCE, and the callback is checked (<code>state</code>, <code>iss</code>).</li>
+          <li>The code is exchanged for a DPoP-bound token, which is stored in your keychain for this server and this issuer only.</li>
+          <li>The paused requests resume; responses, including streamed ones, flow back to your client.</li>
+        </ol>
+      </section>
+
+      <section id="quick-start" aria-labelledby="quick-title">
+        <h2 id="quick-title">Quick start</h2>
+        <p class="section-lead">Three steps, assuming an MCP server protected by an OAuth provider such as Keycloak.</p>
+        <div class="quickstart">
+          <article class="card">
+            <h3><span class="num">1</span>Install</h3>
+            <p>Download a binary from the <a href="https://github.com/ffalcinelli/mcp-passport/releases">releases page</a>, or build it with Rust 1.88+:</p>
+            <pre><code>cargo install --git https://github.com/ffalcinelli/mcp-passport</code></pre>
+          </article>
+          <article class="card">
+            <h3><span class="num">2</span>Register a client</h3>
+            <p>Create a public client (e.g. <code>mcp-passport</code>) with PAR, PKCE S256 and DPoP, and the redirect URI <code>http://127.0.0.1:8082/callback</code>. <a href="https://github.com/ffalcinelli/mcp-passport/blob/main/GUIDE.md#client-registration">Client ID Metadata Documents</a> work too.</p>
+          </article>
+          <article class="card">
+            <h3><span class="num">3</span>Add it to your AI client</h3>
+            <p>Claude Desktop (<code>claude_desktop_config.json</code>):</p>
+            <pre><code>{
+  "mcpServers": {
+    "my-secure-server": {
+      "command": "/path/to/mcp-passport",
+      "args": ["--remote-mcp-url", "https://mcp.example.com/mcp",
+               "--oidc-client-id", "mcp-passport"]
+    }
+  }
+}</code></pre>
+            <p>Claude Code:</p>
+            <pre><code>claude mcp add my-secure-server -- /path/to/mcp-passport \
+  --remote-mcp-url https://mcp.example.com/mcp --oidc-client-id mcp-passport</code></pre>
+          </article>
+        </div>
+        <p class="note">On the first request your browser opens the provider's login page. More clients, every option, and provider setup: <a href="https://github.com/ffalcinelli/mcp-passport/blob/main/GUIDE.md">setup guide</a>.</p>
+      </section>
+
+      <section id="compatibility" aria-labelledby="compat-title">
+        <h2 id="compat-title">Compatibility</h2>
+        <div class="specs">
+          <article class="card">
+            <h3>MCP</h3>
+            <ul>
+              <li>2026-07-28 (stateless, per-request <code>_meta</code>)</li>
+              <li>2025-11-25 and earlier (<code>initialize</code> sessions)</li>
+              <li>Streamable HTTP transport</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>OAuth and OIDC</h3>
+            <ul>
+              <li>RFC 9728, RFC 8414, OIDC Discovery</li>
+              <li>RFC 9126 (PAR), RFC 7636 (PKCE)</li>
+              <li>RFC 9449 (DPoP), RFC 9207 (<code>iss</code>)</li>
+              <li>RFC 8707, Client ID Metadata Documents</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Providers</h3>
+            <ul>
+              <li>Keycloak 26.8.0 (tested end to end)</li>
+              <li>Any provider with PAR, PKCE S256 and DPoP</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Platforms</h3>
+            <ul>
+              <li>macOS (Keychain)</li>
+              <li>Windows (Credential Manager)</li>
+              <li>Linux (Secret Service)</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="security" aria-labelledby="security-title">
+        <h2 id="security-title">Security model</h2>
+        <p class="section-lead">mcp-passport protects your credentials in transit and at rest, and only sends them where they belong.</p>
+        <ul class="checklist">
+          <li>Tokens are bound to a per-login key (DPoP); proofs carry the method, URL, token hash and server nonces.</li>
+          <li>Authorization servers without PKCE S256 are refused; the callback checks <code>state</code> and <code>iss</code>.</li>
+          <li>Credentials are scoped per MCP server and bound to their issuer; refresh tokens never reach another authorization server.</li>
+          <li>Remote endpoints must use HTTPS; the login callback listens on loopback only; challenge metadata is followed on the server's own origin only.</li>
+          <li>Logs live in a private directory, and tokens, keys and codes are never logged.</li>
+        </ul>
+        <p class="note">The local machine is trusted. Read the <a href="https://github.com/ffalcinelli/mcp-passport/blob/main/SECURITY.md">threat model</a>, and report vulnerabilities privately.</p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>mcp-passport · MIT License · © Fabio Falcinelli</span>
+      <nav aria-label="Footer">
+        <a href="latest/mcp_passport/">API docs</a>
+        <a href="https://github.com/ffalcinelli/mcp-passport/blob/main/GUIDE.md">Guide</a>
+        <a href="https://github.com/ffalcinelli/mcp-passport/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ffalcinelli/mcp-passport">GitHub</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>

@@ -8,29 +8,14 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
 
-    // Setup file logging if requested
-    #[cfg(unix)]
-    {
-        use std::fs::DirBuilder;
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = DirBuilder::new();
-        builder.recursive(true);
-        // Set secure permissions (0o700) on the log directory during creation to prevent unauthorized local access to trace contexts
-        builder.mode(0o700);
-        if let Err(e) = builder.create(&config.log_dir) {
-            eprintln!("Failed to create secure log directory: {}", e);
-            std::process::exit(1);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        if let Err(e) = std::fs::create_dir_all(&config.log_dir) {
-            eprintln!("Failed to create log directory: {}", e);
-            std::process::exit(1);
-        }
+    // Log files can contain session metadata: keep the directory private.
+    let log_dir = config.resolved_log_dir();
+    if let Err(e) = mcp_passport::logging::prepare_log_dir(&log_dir) {
+        eprintln!("{:#}", e);
+        std::process::exit(1);
     }
 
-    let file_appender = tracing_appender::rolling::never(&config.log_dir, "mcp-passport.log");
+    let file_appender = tracing_appender::rolling::never(&log_dir, "mcp-passport.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter =
@@ -43,7 +28,10 @@ async fn main() -> anyhow::Result<()> {
         .with(fmt::layer().with_ansi(false).with_writer(non_blocking))
         .init();
 
-    info!("mcp-passport starting up...");
+    info!(
+        "mcp-passport starting up (logs in {})...",
+        log_dir.display()
+    );
     info!("Configuration: {:?}", config);
 
     mcp_passport::run(config, tokio::io::stdin(), tokio::io::stdout()).await

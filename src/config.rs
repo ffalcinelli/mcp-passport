@@ -1,16 +1,26 @@
+//! # Configuration
+//!
+//! Every option is a CLI flag and an `MCP_PASSPORT_*` environment variable
+//! (flags win). See `mcp-passport --help`.
+
 use clap::{Parser, ValueEnum};
 
+/// The scheme of the `Authorization` header sent to the MCP server. The DPoP
+/// proof header is sent with either.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthScheme {
+    /// `Authorization: Bearer <token>`, as the MCP specification requires.
     #[default]
     Bearer,
+    /// `Authorization: DPoP <token>` (RFC 9449 §7.1), for servers that insist.
     Dpop,
 }
 
+/// mcp-passport's configuration.
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Config {
-    /// Remote MCP server JSON-RPC endpoint
+    /// Remote MCP endpoint (the Streamable HTTP URL of the server)
     #[arg(
         long,
         env = "MCP_PASSPORT_REMOTE_MCP_URL",
@@ -18,15 +28,15 @@ pub struct Config {
     )]
     pub remote_mcp_url: String,
 
-    /// Remote MCP server SSE endpoint
+    /// Standalone SSE endpoint of legacy (2025-11-25 and earlier) servers [default: --remote-mcp-url]
     #[arg(
         long,
         env = "MCP_PASSPORT_REMOTE_SSE_URL",
         help_heading = "Server Configuration"
     )]
-    pub remote_sse_url: String,
+    pub remote_sse_url: Option<String>,
 
-    /// MCP Protocol Version to include in headers
+    /// Fallback MCP-Protocol-Version, used only when a message doesn't determine its version
     #[arg(
         long,
         env = "MCP_PASSPORT_MCP_PROTOCOL_VERSION",
@@ -35,7 +45,7 @@ pub struct Config {
     )]
     pub mcp_protocol_version: String,
 
-    /// Authorization header scheme (bearer or dpop)
+    /// Authorization header scheme; the DPoP proof header is sent either way
     #[arg(
         long,
         env = "MCP_PASSPORT_AUTH_SCHEME",
@@ -45,7 +55,7 @@ pub struct Config {
     )]
     pub auth_scheme: AuthScheme,
 
-    /// OIDC Discovery URL
+    /// Authorization server metadata URL (skips discovery from the MCP server)
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_DISCOVERY_URL",
@@ -53,7 +63,7 @@ pub struct Config {
     )]
     pub oidc_discovery_url: Option<String>,
 
-    /// Keycloak OIDC Authorization URL (Override if not using discovery)
+    /// Authorization endpoint override
     #[arg(
         long,
         env = "MCP_PASSPORT_KC_AUTH_URL",
@@ -61,7 +71,7 @@ pub struct Config {
     )]
     pub kc_auth_url: Option<String>,
 
-    /// Keycloak OIDC Token URL (Override if not using discovery)
+    /// Token endpoint override
     #[arg(
         long,
         env = "MCP_PASSPORT_KC_TOKEN_URL",
@@ -69,7 +79,7 @@ pub struct Config {
     )]
     pub kc_token_url: Option<String>,
 
-    /// Keycloak OIDC Pushed Authorization Request (PAR) URL (Override if not using discovery)
+    /// Pushed Authorization Request (PAR) endpoint override
     #[arg(
         long,
         env = "MCP_PASSPORT_KC_PAR_URL",
@@ -77,7 +87,23 @@ pub struct Config {
     )]
     pub kc_par_url: Option<String>,
 
-    /// OIDC Client ID
+    /// Expected issuer of the authorization server the client ID is registered with
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_ISSUER",
+        help_heading = "OIDC Configuration"
+    )]
+    pub oidc_issuer: Option<String>,
+
+    /// Request the offline_access scope (long-lived refresh tokens) when the provider offers it
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_OFFLINE_ACCESS",
+        help_heading = "OIDC Configuration"
+    )]
+    pub oidc_offline_access: bool,
+
+    /// OIDC Client ID (a pre-registered ID, or an https URL of a Client ID Metadata Document)
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_CLIENT_ID",
@@ -86,7 +112,7 @@ pub struct Config {
     )]
     pub oidc_client_id: String,
 
-    /// Local Loopback Redirect URL for OIDC
+    /// Loopback redirect URL for the login callback (must be registered with the provider)
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_REDIRECT_URL",
@@ -95,7 +121,7 @@ pub struct Config {
     )]
     pub oidc_redirect_url: String,
 
-    /// User ID for vault storage
+    /// Name under which credentials are stored in the OS keychain
     #[arg(
         long,
         env = "MCP_PASSPORT_USER_ID",
@@ -103,6 +129,16 @@ pub struct Config {
         help_heading = "Local State"
     )]
     pub user_id: String,
+
+    /// Seconds to wait for the browser login to complete before giving up
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_AUTH_TIMEOUT_SECS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..),
+        help_heading = "Local State"
+    )]
+    pub auth_timeout_secs: u64,
 
     /// Directory containing success.html and failure.html for the auth callback
     #[arg(long, env = "MCP_PASSPORT_TEMPLATE_DIR", help_heading = "Local State")]
@@ -117,20 +153,38 @@ pub struct Config {
     )]
     pub log_level: String,
 
-    /// Directory for logs
+    /// Directory for logs [default: per-user state directory, e.g. ~/.local/state/mcp-passport/logs]
+    #[arg(long, env = "MCP_PASSPORT_LOG_DIR", help_heading = "Logging")]
+    pub log_dir: Option<std::path::PathBuf>,
+
+    /// Allow plain-HTTP MCP and authorization server URLs on non-loopback hosts (insecure)
     #[arg(
         long,
-        env = "MCP_PASSPORT_LOG_DIR",
-        default_value = "/tmp/mcp-passport",
-        help_heading = "Logging"
+        env = "MCP_PASSPORT_ALLOW_INSECURE_HTTP",
+        help_heading = "Server Configuration"
     )]
-    pub log_dir: String,
+    pub allow_insecure_http: bool,
 }
 
 impl Config {
+    /// Parses the process arguments and environment, exiting on errors.
     pub fn parse() -> Self {
         Parser::parse()
     }
+
+    /// The log directory: `--log-dir`, or a private per-user directory.
+    pub fn resolved_log_dir(&self) -> std::path::PathBuf {
+        self.log_dir.clone().unwrap_or_else(default_log_dir)
+    }
+}
+
+/// `$XDG_STATE_HOME/mcp-passport/logs` on Linux, the local data directory on
+/// macOS and Windows, and a per-user temp directory as a last resort.
+pub fn default_log_dir() -> std::path::PathBuf {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .map(|d| d.join("mcp-passport").join("logs"))
+        .unwrap_or_else(|| std::env::temp_dir().join("mcp-passport"))
 }
 
 #[cfg(test)]
@@ -157,6 +211,24 @@ mod tests {
         assert_eq!(config.oidc_client_id, "mcp-passport");
         assert_eq!(config.user_id, "default_user");
         assert_eq!(config.mcp_protocol_version, "2025-11-25");
+        assert_eq!(config.auth_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_config_auth_timeout() {
+        let base = [
+            "mcp-passport",
+            "--remote-mcp-url",
+            "http://mcp/rpc",
+            "--remote-sse-url",
+            "http://mcp/sse",
+        ];
+        let config =
+            Config::try_parse_from(base.iter().chain(&["--auth-timeout-secs", "42"])).unwrap();
+        assert_eq!(config.auth_timeout_secs, 42);
+
+        let zero = Config::try_parse_from(base.iter().chain(&["--auth-timeout-secs", "0"]));
+        assert!(zero.is_err());
     }
 
     #[test]

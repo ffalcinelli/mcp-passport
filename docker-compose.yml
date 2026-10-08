@@ -1,14 +1,15 @@
-version: '3.8'
 
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:26.6.1
+    image: quay.io/keycloak/keycloak:26.8.0
     command: start-dev --import-realm
     environment:
-      - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=admin
-      - KC_HOSTNAME=localhost
-      - KC_HOSTNAME_STRICT=false
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=admin
+      # A fixed issuer URL, so tokens issued to the browser (localhost:8080)
+      # also validate when the mock server introspects via keycloak:8080.
+      - KC_HOSTNAME=http://localhost:8080
+      - KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true
     ports:
       - "8080:8080"
     volumes:

@@ -1,51 +1,51 @@
-# Security Policy
+# Security policy
 
-## Supported Versions
+## Supported versions
 
-Currently, only the `main` branch is supported for security updates.
+`mcp-passport` is pre-1.0. Security fixes go to `main` and to the latest release.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| v0.1.x  | :white_check_mark: |
-| < 0.1   | :x:                |
+| Version | Supported |
+| ------- | --------- |
+| `main` | ✅ |
+| latest 0.0.x release | ✅ |
+| older releases | ❌ |
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-If you discover a potential security vulnerability in `mcp-passport` seriously. If you believe you have found a security vulnerability, please report it to us responsibly.
+Please **do not open a public issue**. Report it privately by email to the maintainer, Fabio Falcinelli <fabio.falcinelli@gmail.com>, or through the repository's *Security → Report a vulnerability* form when it is available.
 
-, please do **not** open a public issue. Instead, report it privately to the maintainers:
+Please include:
 
-- Fabio Falcinelli: [fabio.falcinelli@gmail.com](mailto:fabio.falcinelli@gmail.com)
+- a description of the issue and its impact;
+- the affected version or commit;
+- a minimal reproduction (proof of concept) if possible.
 
-We aim to acknowledge receipt of your report as soon as possible (typically within a few business days). Please note that while we take security seriously, we are a community-maintained project and cannot guarantee a specific resolution timeframe. We will provide updates as we investigate the issue and work toward a fix.
+You'll get an acknowledgement within a few business days. This is a community-maintained project, so there is no guaranteed fix timeline, but we'll keep you informed while we investigate and fix it.
 
-### What to Include in a Report
+## Disclosure
 
-To help us address the issue quickly, please include:
-- A clear description of the vulnerability.
-- A minimal reproducible example (PoC) if possible.
-- Any potential impact or exploitation scenarios.
+1. We acknowledge the report and confirm the issue.
+2. We prepare a fix and a release.
+3. We publish a GitHub Security Advisory once users have had time to update, and credit the reporter unless they prefer otherwise.
 
+## Threat model
 
-## FAPI 2.0 and DPoP Security
+`mcp-passport` runs on the user's machine, between a local AI client (over stdio) and a remote MCP server (over HTTPS). It aims to protect the user's credentials and to send them only where they belong.
 
-`mcp-passport` is designed to provide high-level security for MCP servers. We rely on:
-- **DPoP**: To prevent token theft and replay.
-- **PAR**: To protect authorization parameters.
-- **PKCE**: To prevent authorization code injection.
+**What it defends against**
 
-If you find a bypass in our implementation of these protocols, please report it immediately.
+- **Token theft and replay**: access tokens are DPoP-bound (RFC 9449) to a P-256 key generated for each login. Proofs carry `htm`, `htu`, `ath` and server nonces, and PAR binds the authorization code to the key (`dpop_jkt`).
+- **Authorization code interception and injection**: PKCE S256 is mandatory (authorization servers that don't advertise it are refused), parameters go through Pushed Authorization Requests, and the callback checks `state`.
+- **Mix-up attacks**: the authorization response's `iss` is compared with the discovered issuer (RFC 9207). Discovered metadata must name exactly the expected issuer.
+- **Token misuse across servers**: credentials are stored per MCP server and bound to the issuer that granted them. Refresh tokens are never sent to another authorization server. RFC 8707 resource indicators are always sent.
+- **SSRF through challenges**: a `resource_metadata` URL is followed only on the MCP server's own origin.
+- **Network exposure**: remote endpoints must use HTTPS (except on loopback). The login callback listens only on a loopback address.
+- **Local disclosure via logs**: logs live in a private `0700` directory that may not be a symlink. Tokens, keys and codes are never logged.
 
-## Security Considerations
+**What is out of scope**
 
-### Local Machine Trust
-The proxy communicates with the AI Client via local `stdio`. The security model assumes the local machine is safe. If a user's machine is compromised, local malware could bypass the network authentication by simply hijacking the `stdio` pipeline or querying the OS Vault while unlocked.
+- A compromised local machine or user account. Anything that can drive the proxy's stdio or read the unlocked keychain can act as the user.
+- Malicious or compromised MCP or authorization servers acting within the permissions the user granted them.
+- Weaknesses of the operating system's credential store.
 
-## Disclosure Policy
-
-We follow a responsible disclosure policy:
-1.  Acknowledge the report.
-2.  Investigate and confirm the vulnerability.
-3.  Work on a fix.
-4.  Release a new version with the fix.
-5.  Publicly disclose the vulnerability (e.g., via GitHub Security Advisories) after a fix is available and users have had time to update.
+Reports of bypasses of any defence listed above are very welcome.

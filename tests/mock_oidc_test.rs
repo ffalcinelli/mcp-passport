@@ -34,27 +34,24 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         let _ = axum::serve(mcp_listener, mcp_app).await;
     });
 
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token("sse_user", "valid_token")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key("sse_user", &dpop_key.to_bytes())?;
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
         auth_url_override: Some("a".into()),
         token_url_override: Some("t".into()),
         par_url_override: Some("p".into()),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
     let proxy = Proxy::new(
         "http://unused",
         "sse_user",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -77,7 +74,7 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-loop-v4";
-    let _ = Vault::new(test_svc).delete_token("loop_user");
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -112,22 +109,16 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &rpc_url,
         "loop_user",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -136,7 +127,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         Duration::from_secs(5),
         proxy
             .clone()
-            .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+            .call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
     assert!(res1.is_err());
@@ -145,7 +136,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         Duration::from_secs(5),
         proxy
             .clone()
-            .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"})),
+            .call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"})),
     )
     .await?;
     assert!(res2.is_err());
@@ -156,6 +147,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_discovery_url_construction() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-discovery-v1";
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new()
         .route(
@@ -198,28 +190,22 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy1 = Proxy::new(
         &format!("{}/rpc-with-meta", base_url),
         "user1",
         oidc_config.clone(),
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
     let res1 = timeout(
         Duration::from_secs(2),
-        proxy1.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy1.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
     let err1 = format!("{:?}", res1.err().unwrap());
@@ -229,13 +215,13 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
         &format!("{}/rpc-no-meta", base_url),
         "user2",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
     let res2 = timeout(
         Duration::from_secs(2),
-        proxy2.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy2.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
     let err2 = format!("{:?}", res2.err().unwrap());
@@ -248,7 +234,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
 async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-regression-v1";
     let user = "reg_user";
-    let _ = Vault::new(test_svc).delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let auth_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
@@ -289,7 +275,8 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
                             "issuer": "http://localhost",
                             "authorization_endpoint": "http://localhost/auth",
                             "token_endpoint": "http://localhost/token",
-                            "pushed_authorization_request_endpoint": "http://localhost/par"
+                            "pushed_authorization_request_endpoint": "http://localhost/par",
+                            "code_challenge_methods_supported": ["S256"]
                         }))
                     }
                 }
@@ -304,36 +291,30 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "http://127.0.0.1:8082/callback".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &format!("{}/rpc", base_url),
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
 
     let p1 = proxy.clone();
     let task1 = tokio::spawn(async move {
-        p1.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+        p1.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
             .await
     });
 
     let p2 = proxy.clone();
     let task2 = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        p2.handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        p2.call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
             .await
     });
 
@@ -352,7 +333,7 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
 async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-max-retries";
     let user = "retry_user";
-    let _ = Vault::new(test_svc).delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -380,29 +361,23 @@ async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &rpc_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
 
     let res = timeout(
         Duration::from_secs(5),
-        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
 
@@ -414,8 +389,7 @@ async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
 async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-sse-401";
     let user = "sse_401_user";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/sse",
@@ -441,22 +415,16 @@ async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &sse_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -479,15 +447,10 @@ async fn test_discovery_failure_handling() -> anyhow::Result<()> {
         discovery_url: Some("http://localhost:12345/invalid".into()),
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
-    let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
+    let res = AuthManager::discover(oidc_config, "res".into(), Vault::in_memory("svc"), None).await;
     assert!(res.is_err());
     Ok(())
 }
@@ -518,15 +481,10 @@ async fn test_discovery_missing_par_endpoint() -> anyhow::Result<()> {
         discovery_url: Some(discovery_url),
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
-    let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
+    let res = AuthManager::discover(oidc_config, "res".into(), Vault::in_memory("svc"), None).await;
     assert!(res.is_err());
     Ok(())
 }
@@ -549,18 +507,15 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
 
     let am = AuthManager::discover(
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "http://127.0.0.1:8081/callback".into(),
-            auth_url_override: Some("a".into()),
-            token_url_override: Some("t".into()),
+            auth_url_override: Some("http://127.0.0.1:1/auth".into()),
+            token_url_override: Some("http://127.0.0.1:1/token".into()),
             par_url_override: Some(par_url),
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
         "res".into(),
-        "svc",
+        Vault::in_memory("svc"),
         None,
     )
     .await?;
@@ -572,10 +527,9 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_403_step_up_trigger() -> anyhow::Result<()> {
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     let test_svc = "mcp-passport-test-403";
     let user = "stepup_user";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token(user, "valid_but_low_scope")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key(user, &dpop_key.to_bytes())?;
@@ -613,7 +567,8 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
                     "issuer": "http://localhost",
                     "authorization_endpoint": "http://localhost/auth",
                     "token_endpoint": "http://localhost/token",
-                    "pushed_authorization_request_endpoint": "http://localhost/par"
+                    "pushed_authorization_request_endpoint": "http://localhost/par",
+                            "code_challenge_methods_supported": ["S256"]
                 }))
             }),
         );
@@ -623,22 +578,16 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &rpc_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -646,7 +595,7 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
     // This should trigger 403, then discovery, then PAR, then wait for callback.
     let res = timeout(
         Duration::from_secs(2),
-        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
 
@@ -658,7 +607,7 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
 async fn test_sse_non_401_error() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-sse-err";
     let user = "sse_err_user";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token(user, "t")?;
     vault.store_dpop_key(user, &DpopKey::generate().to_bytes())?;
 
@@ -678,17 +627,11 @@ async fn test_sse_non_401_error() -> anyhow::Result<()> {
         &sse_url,
         user,
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "r".into(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -707,8 +650,7 @@ async fn test_sse_non_401_error() -> anyhow::Result<()> {
 async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-redundant";
     let user = "redundant_user";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -734,17 +676,11 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
         &rpc_url,
         user,
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "r".into(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -752,7 +688,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
     let p1 = p.clone();
     let task1 = tokio::spawn(async move {
         let _ = p1
-            .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+            .call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
             .await;
     });
 
@@ -760,7 +696,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
 
     vault.store_token(user, "new_token")?;
     let res = p
-        .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        .call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
         .await;
 
     assert!(res.is_err() || res.is_ok());
@@ -773,7 +709,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
 async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-nocontent";
     let user = "nocontent_user";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token(user, "valid_token")?;
     vault.store_dpop_key(user, &DpopKey::generate().to_bytes())?;
 
@@ -801,34 +737,28 @@ async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
         &rpc_url,
         user,
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "r".into(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
 
-    // First request should capture session ID and return Null (for NO_CONTENT)
+    // First request should capture session ID and return nothing (for NO_CONTENT)
     let res1 = proxy
         .clone()
-        .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+        .call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
         .await?;
-    assert_eq!(res1, serde_json::Value::Null);
+    assert_eq!(res1, None);
 
     // Second request should include the session ID
     // We can't easily verify the header here without changing the mock, but we can check if it finishes.
     let res2 = proxy
-        .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        .call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
         .await?;
-    assert_eq!(res2, serde_json::Value::Null);
+    assert_eq!(res2, None);
 
     Ok(())
 }
@@ -837,8 +767,7 @@ async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
 async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-timeout";
     let user = "timeout_user";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -862,22 +791,19 @@ async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "http://127.0.0.1:8081/callback".into(),
         auth_url_override: Some("a".into()),
         token_url_override: Some("t".into()),
         par_url_override: Some("p".into()),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &rpc_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -885,7 +811,7 @@ async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
     // This should time out because "a", "t", "p" are invalid URLs or won't respond
     let res = timeout(
         Duration::from_secs(5),
-        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
 
@@ -899,9 +825,6 @@ async fn test_lib_run_minimal() -> anyhow::Result<()> {
     use mcp_passport::config::Config;
     use tokio::io::AsyncWriteExt;
 
-    let test_svc = "mcp-passport-test-run";
-    let _ = Vault::new(test_svc).delete_token("run_user");
-
     let mcp_app = Router::new().route(
         "/rpc",
         post(|| async move { axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})) }),
@@ -914,8 +837,7 @@ async fn test_lib_run_minimal() -> anyhow::Result<()> {
     });
 
     // Pre-populate vault to skip OIDC
-    let vault = Vault::new("mcp-passport"); // default service in run()
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+    let vault = Vault::in_memory("mcp-passport-test-run");
     vault.store_token("run_user", "valid")?;
     vault.store_dpop_key("run_user", &DpopKey::generate().to_bytes())?;
 
@@ -936,8 +858,9 @@ async fn test_lib_run_minimal() -> anyhow::Result<()> {
     let (_client_out_rx, server_out_tx) = tokio::io::duplex(1024);
     let (mut client_in_tx, server_in_rx) = tokio::io::duplex(1024);
 
-    let run_handle =
-        tokio::spawn(async move { mcp_passport::run(config, server_in_rx, server_out_tx).await });
+    let run_handle = tokio::spawn(async move {
+        mcp_passport::run_with_vault(config, vault, server_in_rx, server_out_tx).await
+    });
 
     client_in_tx
         .write_all(b"{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"test\"}\n")

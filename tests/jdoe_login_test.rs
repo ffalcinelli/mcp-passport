@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::Context;
 use axum::http::{HeaderMap, StatusCode};
 use axum::{extract as ax_extract, routing::post, Json, Router};
@@ -5,10 +7,9 @@ use fantoccini::{ClientBuilder, Locator};
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::AuthScheme;
 use mcp_passport::proxy::Proxy;
+use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::time::Duration;
-use testcontainers::{core::Mount, core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::info;
@@ -79,7 +80,6 @@ async fn mock_mcp_handler(
 #[ignore]
 async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     // 0. Setup environment and tracing
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
 
     let _ = tracing_subscriber::fmt()
@@ -88,26 +88,8 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
         .try_init();
 
     // 1. Start Keycloak
-    let realm_path = std::env::current_dir()?.join("keycloak-realm.json");
-    let realm_path_str = realm_path.to_str().unwrap();
-
-    let keycloak_img = GenericImage::new("quay.io/keycloak/keycloak", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Listening on:"))
-        .with_env_var("KEYCLOAK_ADMIN", "admin")
-        .with_env_var("KEYCLOAK_ADMIN_PASSWORD", "admin")
-        .with_mount(Mount::bind_mount(
-            realm_path_str,
-            "/opt/keycloak/data/import/realm.json",
-        ))
-        .with_cmd(["start-dev", "--import-realm"]);
-
-    let keycloak_container = keycloak_img
-        .start()
-        .await
-        .expect("Failed to start Keycloak");
-
-    let keycloak_port = keycloak_container.get_host_port_ipv4(8080).await?;
-    let keycloak_base = format!("http://127.0.0.1:{}", keycloak_port);
+    let keycloak = common::start_keycloak().await?;
+    let keycloak_base = keycloak.base.clone();
     let oidc_discovery = format!(
         "{}/realms/mcp/.well-known/openid-configuration",
         keycloak_base
@@ -116,14 +98,8 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     info!("Keycloak started at {}", keycloak_base);
 
     // 2. Start Chromedriver
-    let chromedriver_img = GenericImage::new("selenium/standalone-chrome", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Started Selenium Standalone"))
-        .with_network("host");
-    let _chromedriver_container = chromedriver_img
-        .start()
-        .await
-        .expect("Failed to start Chromedriver");
-    let chrome_url = "http://localhost:4444";
+    let _chromedriver_container = common::start_chrome().await?;
+    let chrome_url = common::CHROME_URL;
 
     // 3. Start Mock MCP Server
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -170,19 +146,14 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
         discovery_url: Some(oidc_discovery),
         client_id: "mcp-passport".into(),
         redirect_url: redirect_url.to_string(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
         &mock_url,
         user_id,
         oidc_config.clone(),
-        "mcp-passport-jdoe-test",
+        Vault::in_memory("mcp-passport-jdoe-test"),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -211,7 +182,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     let proxy_call = proxy.clone();
     let request_task = tokio::spawn(async move {
         proxy_call
-            .handle_request(json!({
+            .call(json!({
                 "jsonrpc": "2.0",
                 "id": "list-1",
                 "method": "tools/list",
@@ -231,7 +202,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
 
     let client = ClientBuilder::native()
         .capabilities(caps)
-        .connect(&chrome_url)
+        .connect(chrome_url)
         .await?;
     client.goto(&auth_url).await?;
 
@@ -257,13 +228,13 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     info!("Waiting for first request to complete...");
     let res = timeout(Duration::from_secs(90), request_task).await??;
     info!("Request result: {:?}", res);
-    let val = res.context("Request failed")?;
+    let val = res.context("Request failed")?.context("No response")?;
     assert!(val.get("result").is_some(), "Result missing in response");
 
     // 9. Invoke a tool
     info!("Invoking mock tool...");
     let res_tool = proxy
-        .handle_request(json!({
+        .call(json!({
             "jsonrpc": "2.0",
             "id": "call-1",
             "method": "tools/call",
@@ -272,7 +243,8 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
                 "arguments": { "input": "hello" }
             }
         }))
-        .await?;
+        .await?
+        .context("No response to tools/call")?;
 
     info!("Tool call result: {:?}", res_tool);
     assert!(res_tool.get("result").is_some());

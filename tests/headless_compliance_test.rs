@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::Context;
 use ax_extract::Form;
 use axum::http::{HeaderMap, StatusCode};
@@ -15,7 +17,6 @@ use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -69,7 +70,6 @@ struct AppState {
 #[ignore]
 async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     // Ensure we use the memory vault and skip browser for reliability in all environments
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
 
     // 0. Setup tracing
@@ -79,21 +79,8 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
         .try_init();
 
     // 1. Start Chromedriver
-    let chromedriver_img = GenericImage::new("selenium/standalone-chrome", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Started Selenium Standalone"))
-        .with_network("host");
-    let _chromedriver_container = chromedriver_img
-        .start()
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to start Chromedriver container. Is Docker running and accessible? \
-                 If you are using a non-standard socket, try setting DOCKER_HOST (e.g., DOCKER_HOST=unix:///var/run/docker.sock). \
-                 Error: {:?}",
-                e
-            )
-        })?;
-    let chrome_url = "http://localhost:4444";
+    let _chromedriver_container = common::start_chrome().await?;
+    let chrome_url = common::CHROME_URL;
 
     // 2. Setup Mock OIDC Server with UI and session tracking
     let (state_tx, mut _state_rx) = mpsc::channel::<String>(1);
@@ -119,7 +106,8 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
                     "organization_name": "Mock OIDC Provider",
                     "authorization_endpoint": format!("{}/auth", base),
                     "token_endpoint": format!("{}/token", base),
-                    "pushed_authorization_request_endpoint": format!("{}/par", base)
+                    "pushed_authorization_request_endpoint": format!("{}/par", base),
+                    "code_challenge_methods_supported": ["S256"]
                 }))
             }
         }))
@@ -180,26 +168,20 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     // 4. Initialize OidcConfig with test channels
     let (url_tx, url_rx) = oneshot::channel::<String>();
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "test-client".into(),
         redirect_url: "http://localhost:8082/callback".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(Some(url_tx))),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     // 5. Initialize Proxy
     let test_svc = "mcp-passport-compliance-headless-v1";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token("mock_user");
+    let vault = Vault::in_memory(test_svc);
     let proxy = Proxy::new(
         &mcp_url,
         "mock_user",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -213,7 +195,7 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
         let mut writer = proxy_writer;
         while let Ok(Some(line)) = reader.next_line().await {
             if let Ok(payload) = serde_json::from_str::<Value>(&line) {
-                if let Ok(res) = p.clone().handle_request(payload).await {
+                if let Ok(Some(res)) = p.call(payload).await {
                     let _ = writer.write_all(format!("{}\n", res).as_bytes()).await;
                     let _ = writer.flush().await;
                 }
@@ -237,7 +219,7 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
 
     let client = ClientBuilder::native()
         .capabilities(caps)
-        .connect(&chrome_url)
+        .connect(chrome_url)
         .await?;
     client.goto(&auth_url).await?;
 

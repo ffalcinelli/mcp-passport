@@ -1,7 +1,5 @@
 # Authors
 
-The following people have contributed to the `mcp-passport` project:
+- **Fabio Falcinelli** <fabio.falcinelli@gmail.com>: creator and maintainer.
 
-* **Fabio** <fabio@example.com> - *Initial work and Lead Maintainer*
-
-Interested in contributing? Check out our `README.md` for more information on how to get involved.
+Thanks to everyone who has contributed code, reviews and bug reports; see the [contributors graph](https://github.com/ffalcinelli/mcp-passport/graphs/contributors). Want to help? Start with [CONTRIBUTING.md](CONTRIBUTING.md).

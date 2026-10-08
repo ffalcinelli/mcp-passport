@@ -70,8 +70,8 @@ jobs:
           mkdir -p "$VERSION_DIR"
           cp -r target/doc/* "$VERSION_DIR/"
           
-          # Root redirector
-          echo '<meta http-equiv="refresh" content="0; url=latest/mcp_passport/index.html">' > target/deploy/index.html
+          # Landing page at the site root (the API docs live under latest/ and v*/)
+          cp -r site/. target/deploy/
           
           # Generate versions.json
           echo -n '["latest"' > target/deploy/versions.json

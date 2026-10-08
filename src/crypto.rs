@@ -34,6 +34,9 @@ struct DpopClaims {
     iat: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     ath: Option<String>,
+    /// Server-provided nonce (RFC 9449 §8, §9).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
 }
 
 impl DpopKey {
@@ -68,18 +71,32 @@ impl DpopKey {
         }))
     }
 
+    /// The RFC 7638 JWK thumbprint of the public key (the DPoP `jkt`).
+    pub fn jkt(&self) -> Result<String> {
+        let jwk = self.public_jwk()?;
+        let coord = |k: &str| {
+            jwk[k]
+                .as_str()
+                .map(str::to_string)
+                .context("missing JWK coordinate")
+        };
+        Ok(ec_thumbprint(&coord("x")?, &coord("y")?))
+    }
+
     /// Generates a DPoP Proof JWT for a given HTTP method and URL.
     /// Optional access_token can be provided to include 'ath' claim.
     pub fn generate_proof(&self, htm: &str, htu: &str) -> Result<String> {
-        self.generate_proof_with_ath(htm, htu, None)
+        self.generate_proof_with_ath(htm, htu, None, None)
     }
 
-    /// Generates a DPoP Proof JWT with an access token hash (ath).
+    /// Generates a DPoP Proof JWT, optionally with an access token hash (`ath`)
+    /// and a server-provided `nonce`.
     pub fn generate_proof_with_ath(
         &self,
         htm: &str,
         htu: &str,
         access_token: Option<&str>,
+        nonce: Option<&str>,
     ) -> Result<String> {
         let jwk = self.public_jwk()?;
 
@@ -100,9 +117,10 @@ impl DpopKey {
         let claims = DpopClaims {
             jti: Uuid::new_v4().to_string(),
             htm: htm.to_string(),
-            htu: htu.to_string(),
+            htu: normalize_htu(htu),
             iat: now,
             ath,
+            nonce: nonce.map(str::to_string),
         };
 
         let header_str = serde_json::to_string(&header)?;
@@ -131,9 +149,77 @@ impl DpopKey {
     }
 }
 
+/// RFC 7638 thumbprint of a P-256 key: SHA-256 over the required members in
+/// lexicographic order, without whitespace.
+fn ec_thumbprint(x: &str, y: &str) -> String {
+    let canonical = format!(r#"{{"crv":"P-256","kty":"EC","x":"{x}","y":"{y}"}}"#);
+    URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes()))
+}
+
+/// The `DPoP-Nonce` response header, if present (RFC 9449 §8.1).
+pub fn dpop_nonce(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// The `htu` claim is the target URI without query and fragment (RFC 9449 §4.2).
+fn normalize_htu(htu: &str) -> String {
+    match url::Url::parse(htu) {
+        Ok(mut u) if u.query().is_some() || u.fragment().is_some() => {
+            u.set_query(None);
+            u.set_fragment(None);
+            u.into()
+        }
+        _ => htu.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ec_thumbprint_rfc9449_example() {
+        // RFC 9449 §6.1 / §10: the example key and its jkt.
+        assert_eq!(
+            ec_thumbprint(
+                "l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs",
+                "9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA"
+            ),
+            "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+        );
+    }
+
+    #[test]
+    fn test_jkt_matches_proof_jwk() -> Result<()> {
+        let key = DpopKey::generate();
+        let proof = key.generate_proof("POST", "https://as/token")?;
+        let header: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(proof.split('.').next().unwrap())?)?;
+        let jwk = &header["jwk"];
+        assert_eq!(
+            key.jkt()?,
+            ec_thumbprint(jwk["x"].as_str().unwrap(), jwk["y"].as_str().unwrap())
+        );
+        assert_eq!(key.jkt()?.len(), 43);
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_htu() {
+        assert_eq!(
+            normalize_htu("https://api.example.com/rpc?session=1#frag"),
+            "https://api.example.com/rpc"
+        );
+        assert_eq!(
+            normalize_htu("https://api.example.com/rpc"),
+            "https://api.example.com/rpc"
+        );
+        assert_eq!(normalize_htu("not a url"), "not a url");
+    }
 
     #[test]
     fn test_dpop_key_generate_and_bytes() -> Result<()> {
@@ -233,11 +319,31 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_proof_with_nonce() -> Result<()> {
+        let key = DpopKey::generate();
+        let decode = |proof: String| -> Result<Value> {
+            let claims = proof.split('.').nth(1).unwrap().to_string();
+            Ok(serde_json::from_slice(&URL_SAFE_NO_PAD.decode(claims)?)?)
+        };
+
+        let with =
+            decode(key.generate_proof_with_ath("POST", "https://as/token", None, Some("n-1"))?)?;
+        assert_eq!(with["nonce"], "n-1");
+        let without = decode(key.generate_proof("POST", "https://as/token")?)?;
+        assert!(without.get("nonce").is_none());
+        Ok(())
+    }
+
+    #[test]
     fn test_generate_proof_with_ath() -> Result<()> {
         let key = DpopKey::generate();
         let access_token = "test_token";
-        let proof =
-            key.generate_proof_with_ath("GET", "https://api.example.com/sse", Some(access_token))?;
+        let proof = key.generate_proof_with_ath(
+            "GET",
+            "https://api.example.com/sse",
+            Some(access_token),
+            None,
+        )?;
         let parts: Vec<&str> = proof.split('.').collect();
         assert_eq!(parts.len(), 3);
 
