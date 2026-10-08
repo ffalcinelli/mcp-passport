@@ -2,10 +2,12 @@
 name = "mcp-passport"
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.88"
 authors = ["Fabio Falcinelli <fabio.falcinelli@gmail.com>"]
 description = "Secure 1:1 transparent Layer 7 proxy for the Model Context Protocol (MCP)"
 readme = "README.md"
-homepage = "https://github.com/ffalcinelli/mcp-passport"
+homepage = "https://ffalcinelli.github.io/mcp-passport/"
+documentation = "https://ffalcinelli.github.io/mcp-passport/latest/mcp_passport/"
 repository = "https://github.com/ffalcinelli/mcp-passport"
 license = "MIT"
 keywords = ["mcp", "proxy", "oidc", "fapi", "security"]

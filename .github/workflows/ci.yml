@@ -26,6 +26,19 @@ jobs:
       - name: Check code formatting
         run: cargo fmt --all -- --check
 
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          # Keep in sync with `rust-version` in Cargo.toml.
+          toolchain: "1.88"
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Check the library and binary
+        run: cargo check --locked
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
