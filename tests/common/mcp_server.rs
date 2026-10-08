@@ -216,6 +216,18 @@ fn decode_header(value: &str) -> Option<String> {
 // Authorization
 // ---------------------------------------------------------------------------
 
+/// Decrements `counter` if it is positive; returns whether it did.
+fn take_one(counter: &AtomicUsize) -> bool {
+    let mut current = counter.load(Ordering::SeqCst);
+    while current > 0 {
+        match counter.compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
+}
+
 /// Validates the access token and its DPoP proof. Returns the token's scopes.
 async fn check_auth(s: &AppState, headers: &HeaderMap, htm: &str) -> Result<Vec<String>, Response> {
     let Some(introspection) = &s.options.introspection else {
@@ -271,10 +283,7 @@ async fn check_auth(s: &AppState, headers: &HeaderMap, htm: &str) -> Result<Vec<
             Some("invalid_token"),
         ));
     }
-    if s.reject_left
-        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok()
-    {
+    if take_one(&s.reject_left) {
         return Err(reject("forced rejection".into(), Some("invalid_token")));
     }
     Ok(introspected["scope"]
