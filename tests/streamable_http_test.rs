@@ -436,3 +436,112 @@ async fn test_legacy_negotiated_version_and_session() {
     assert_eq!(seen[2]["mcp-protocol-version"], "2026-07-28");
     assert!(!seen[2].contains_key("mcp-session-id"));
 }
+
+/// A server whose `region` parameter is mirrored into `Mcp-Param-Region`.
+/// `schema_version` switches the annotation name, as if the server changed
+/// the tool after the client listed it.
+async fn x_mcp_header_server(schema_version: Arc<Mutex<u32>>) -> (String, Seen) {
+    let seen: Seen = Arc::default();
+    let s = seen.clone();
+    let app = Router::new().route(
+        "/mcp",
+        post(move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let (s, schema_version) = (s.clone(), schema_version.clone());
+            async move {
+                let map: HashMap<String, String> = headers
+                    .iter()
+                    .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect();
+                s.lock().unwrap().push(map.clone());
+                let header = if *schema_version.lock().unwrap() == 1 { "Region" } else { "Zone" };
+                match body["method"].as_str() {
+                    Some("tools/list") => axum::Json(json!({"jsonrpc": "2.0", "id": body["id"],
+                        "result": {"tools": [
+                            {"name": "sql", "inputSchema": {"type": "object", "properties": {
+                                "region": {"type": "string", "x-mcp-header": header},
+                                "query": {"type": "string"}}}},
+                            {"name": "broken", "inputSchema": {"type": "object", "properties": {
+                                "n": {"type": "number", "x-mcp-header": "N"}}}},
+                            {"name": "plain", "inputSchema": {"type": "object"}}
+                        ]}}))
+                    .into_response(),
+                    Some("tools/call") => {
+                        let expected = format!("mcp-param-{}", header.to_lowercase());
+                        if map.get(&expected).map(String::as_str) != body["params"]["arguments"]["region"].as_str() {
+                            return (StatusCode::BAD_REQUEST, axum::Json(json!({"jsonrpc": "2.0",
+                                "id": body["id"], "error": {"code": -32020, "message": "Header mismatch"}})))
+                                .into_response();
+                        }
+                        axum::Json(json!({"jsonrpc": "2.0", "id": body["id"], "result": {"ok": true}}))
+                            .into_response()
+                    }
+                    _ => StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        }),
+    );
+    (format!("{}/mcp", serve(app).await), seen)
+}
+
+fn sql_call(id: u64) -> Value {
+    modern(
+        id,
+        "tools/call",
+        json!({"name": "sql", "arguments": {"region": "us-west1", "query": "SELECT 1"}}),
+    )
+}
+
+#[tokio::test]
+async fn test_x_mcp_header_mirrored_and_invalid_tools_dropped() {
+    let (url, seen) = x_mcp_header_server(Arc::new(Mutex::new(1))).await;
+    let proxy = authed_proxy(&url);
+
+    let list = proxy
+        .call(modern(1, "tools/list", json!({})))
+        .await
+        .unwrap()
+        .unwrap();
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["sql", "plain"],
+        "the invalid tool is filtered out"
+    );
+
+    let resp = proxy.call(sql_call(2)).await.unwrap().unwrap();
+    assert_eq!(resp["result"]["ok"], true);
+    assert_eq!(seen.lock().unwrap()[1]["mcp-param-region"], "us-west1");
+}
+
+#[tokio::test]
+async fn test_header_mismatch_refreshes_tools_and_retries() {
+    let version = Arc::new(Mutex::new(1));
+    let (url, seen) = x_mcp_header_server(version.clone()).await;
+    let proxy = authed_proxy(&url);
+
+    proxy
+        .call(modern(1, "tools/list", json!({})))
+        .await
+        .unwrap();
+    // The server renames the header; our cached annotation is now stale.
+    *version.lock().unwrap() = 2;
+
+    let resp = proxy.call(sql_call(2)).await.unwrap().unwrap();
+    assert_eq!(resp["result"]["ok"], true);
+
+    let seen = seen.lock().unwrap();
+    let methods: Vec<&str> = seen.iter().map(|h| h["mcp-method"].as_str()).collect();
+    // list, rejected call, refresh list, retried call
+    assert_eq!(
+        methods,
+        vec!["tools/list", "tools/call", "tools/list", "tools/call"]
+    );
+    assert_eq!(seen[3]["mcp-param-zone"], "us-west1");
+    // The refresh carries the protocol metadata of the original request.
+    assert_eq!(seen[2]["mcp-protocol-version"], "2026-07-28");
+}

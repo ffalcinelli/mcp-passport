@@ -57,6 +57,8 @@ pub struct Proxy {
     rs_nonce: std::sync::Mutex<Option<String>>,
     /// Version negotiated by a legacy `initialize` handshake.
     negotiated_version: std::sync::Mutex<Option<String>>,
+    /// `x-mcp-header` annotations of the tools seen in `tools/list` results.
+    tool_headers: std::sync::Mutex<std::collections::HashMap<String, mcp::ToolHeaders>>,
 }
 
 /// A fresh token rejected within this window means re-authenticating again
@@ -89,6 +91,14 @@ struct LastSuccess {
     scopes: Option<Vec<String>>,
     /// Whether the token came from a refresh rather than a browser login.
     via_refresh: bool,
+}
+
+/// How one round trip of [`Proxy::send_once`] ended.
+enum Outcome {
+    /// The reply (if any) was forwarded.
+    Done,
+    /// The server rejected the request's headers (`-32020`); not forwarded yet.
+    HeaderMismatch(Value),
 }
 
 /// A token and the DPoP key it is bound to.
@@ -163,6 +173,7 @@ impl Proxy {
             connected_tx: watch::channel(false).0,
             rs_nonce: std::sync::Mutex::new(None),
             negotiated_version: std::sync::Mutex::new(None),
+            tool_headers: std::sync::Mutex::default(),
         })
     }
 
@@ -266,7 +277,7 @@ impl Proxy {
 
     /// Inspects a message the server sent in reply to `request` before it is
     /// forwarded, and returns the message to forward.
-    fn observe_response(&self, request: &Value, message: Value) -> Value {
+    fn observe_response(&self, request: &Value, mut message: Value) -> Value {
         if mcp::method_of(request) == Some("initialize") && message.get("id") == request.get("id") {
             if let Some(v) = message
                 .pointer("/result/protocolVersion")
@@ -278,7 +289,101 @@ impl Proxy {
                 }
             }
         }
+        if mcp::method_of(request) == Some("tools/list") && message.get("id") == request.get("id") {
+            if let Some(tools) = message
+                .pointer_mut("/result/tools")
+                .and_then(Value::as_array_mut)
+            {
+                self.record_tools(tools);
+            }
+        }
         message
+    }
+
+    /// Caches the `x-mcp-header` annotations of `tools` and removes the tools
+    /// whose annotations are invalid, as Streamable HTTP clients must.
+    fn record_tools(&self, tools: &mut Vec<Value>) {
+        let Ok(mut cache) = self.tool_headers.lock() else {
+            return;
+        };
+        tools.retain(|tool| {
+            let name = tool.get("name").and_then(Value::as_str).unwrap_or_default();
+            let schema = tool.get("inputSchema").unwrap_or(&Value::Null);
+            match mcp::tool_header_annotations(schema) {
+                Ok(headers) => {
+                    if headers.is_empty() {
+                        cache.remove(name);
+                    } else {
+                        cache.insert(name.to_string(), headers);
+                    }
+                    true
+                }
+                Err(reason) => {
+                    warn!("Rejecting tool '{}' from tools/list: {}", name, reason);
+                    cache.remove(name);
+                    false
+                }
+            }
+        });
+    }
+
+    /// `Mcp-Param-*` headers for a `tools/call`, from the cached annotations.
+    fn tool_param_headers(&self, payload: &Value) -> Vec<(String, String)> {
+        if mcp::method_of(payload) != Some("tools/call") {
+            return Vec::new();
+        }
+        let Some(name) = payload.pointer("/params/name").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let cache = match self.tool_headers.lock() {
+            Ok(cache) => cache,
+            Err(_) => return Vec::new(),
+        };
+        match cache.get(name) {
+            Some(headers) => mcp::param_headers(payload.pointer("/params/arguments"), headers),
+            None => Vec::new(),
+        }
+    }
+
+    /// Re-reads `tools/list` (all pages, up to a limit) to refresh the cached
+    /// annotations, using the protocol metadata of `request`.
+    async fn refresh_tool_headers(&self, request: &Value) -> Result<()> {
+        const MAX_PAGES: usize = 10;
+        let mut cursor: Option<Value> = None;
+        for page in 0..MAX_PAGES {
+            let mut params = serde_json::Map::new();
+            if let Some(meta) = request.pointer("/params/_meta") {
+                params.insert("_meta".into(), meta.clone());
+            }
+            if let Some(c) = cursor.take() {
+                params.insert("cursor".into(), c);
+            }
+            let list = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": format!("mcp-passport-tools-list-{page}"),
+                "method": "tools/list",
+                "params": params,
+            });
+            let (tx, mut rx) = mpsc::channel(16);
+            let outcome = self.send_once(&list, &tx).await?;
+            drop(tx);
+            if let Outcome::HeaderMismatch(v) = outcome {
+                anyhow::bail!("tools/list was rejected: {}", v);
+            }
+            let mut next = None;
+            while let Some(m) = rx.recv().await {
+                if let Ok(v) = serde_json::from_str::<Value>(&m) {
+                    if v.get("id") == list.get("id") {
+                        next = v.pointer("/result/nextCursor").cloned();
+                    }
+                }
+            }
+            match next {
+                Some(c) if !c.is_null() => cursor = Some(c),
+                _ => return Ok(()),
+            }
+        }
+        Ok(())
     }
 
     /// Builds a request to the remote server with the MCP headers and, when a
@@ -297,6 +402,9 @@ impl Proxy {
             .header("MCP-Protocol-Version", self.protocol_version_for(payload));
         if let Some(payload) = payload {
             for (name, value) in mcp::standard_headers(payload) {
+                request = request.header(name, value);
+            }
+            for (name, value) in self.tool_param_headers(payload) {
                 request = request.header(name, value);
             }
         }
@@ -400,6 +508,29 @@ impl Proxy {
     /// returns for it to `out`: a JSON body, or each event of a
     /// `text/event-stream` response (MCP Streamable HTTP).
     pub async fn handle_request(&self, payload: Value, out: &mpsc::Sender<String>) -> Result<()> {
+        match self.send_once(&payload, out).await? {
+            Outcome::Done => Ok(()),
+            Outcome::HeaderMismatch(error) => {
+                // The tool's x-mcp-header annotations probably changed: re-read
+                // tools/list and retry once with the new headers.
+                warn!("Server reported a header mismatch; refreshing tools/list and retrying.");
+                if let Err(e) = self.refresh_tool_headers(&payload).await {
+                    warn!("Could not refresh tools/list: {:#}", e);
+                }
+                match self.send_once(&payload, out).await? {
+                    Outcome::Done => Ok(()),
+                    Outcome::HeaderMismatch(_) => {
+                        let _ = out.send(error.to_string()).await;
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sends `payload` once (with auth and nonce retries) and forwards the
+    /// reply, except a `HeaderMismatch` error which is returned to the caller.
+    async fn send_once(&self, payload: &Value, out: &mpsc::Sender<String>) -> Result<Outcome> {
         let max_retries = 2;
         let mut retry_count = 0;
         let mut loaded_gen: Option<u64> = None;
@@ -419,7 +550,7 @@ impl Proxy {
                 loaded_gen = Some(gen);
             }
 
-            let response = self.execute_request(credentials.as_ref(), &payload).await?;
+            let response = self.execute_request(credentials.as_ref(), payload).await?;
             let got_nonce = self.update_rs_nonce(response.headers());
             if Self::wants_dpop_nonce(response.status(), response.headers()) {
                 // Not an auth failure: resend once with the nonce, outside the airlock.
@@ -466,7 +597,7 @@ impl Proxy {
         }
 
         if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT {
-            return Ok(());
+            return Ok(Outcome::Done);
         }
 
         let is_event_stream = response
@@ -476,26 +607,34 @@ impl Proxy {
             .is_some_and(|v| v.starts_with("text/event-stream"));
 
         if status.is_success() && is_event_stream {
-            return self.forward_event_stream(response, &payload, out).await;
+            self.forward_event_stream(response, payload, out).await?;
+            return Ok(Outcome::Done);
         }
 
         let body = response.bytes().await?;
         if status.is_success() {
             if body.iter().all(u8::is_ascii_whitespace) {
-                return Ok(());
+                return Ok(Outcome::Done);
             }
             let value: Value = serde_json::from_slice(&body)
                 .context("Remote MCP server returned a body that is not JSON")?;
-            let value = self.observe_response(&payload, value);
+            let value = self.observe_response(payload, value);
             let _ = out.send(value.to_string()).await;
-            return Ok(());
+            return Ok(Outcome::Done);
         }
 
         // Some servers put a JSON-RPC error in a non-2xx response: pass it on as is.
         if let Ok(value) = serde_json::from_slice::<Value>(&body) {
             if value.get("jsonrpc").is_some() && value.get("error").is_some() {
+                let mismatch = status == StatusCode::BAD_REQUEST
+                    && mcp::method_of(payload) == Some("tools/call")
+                    && value.pointer("/error/code").and_then(Value::as_i64)
+                        == Some(mcp::HEADER_MISMATCH);
+                if mismatch {
+                    return Ok(Outcome::HeaderMismatch(value));
+                }
                 let _ = out.send(value.to_string()).await;
-                return Ok(());
+                return Ok(Outcome::Done);
             }
         }
         let text = String::from_utf8_lossy(&body);
