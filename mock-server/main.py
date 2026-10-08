@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import jwt
 from typing import Optional
 import json
@@ -91,17 +91,23 @@ def validate_dpop_proof(dpop: str, method: str, url: str, access_token: str):
             raise e
         raise HTTPException(status_code=401, detail=f"Invalid DPoP proof: {str(e)}")
 
+def resource_metadata_url(request: Request) -> str:
+    """RFC 9728 path-inserted metadata URL for the /rpc MCP endpoint."""
+    return sanitize_url_for_header(f"{request.base_url}.well-known/oauth-protected-resource/rpc")
+
+
+def challenge(request: Request, error: Optional[str] = None) -> dict:
+    value = f'Bearer resource_metadata="{resource_metadata_url(request)}", scope="openid"'
+    if error:
+        value += f', error="{error}"'
+    return {"WWW-Authenticate": value}
+
+
 async def verify_auth(request: Request, authorization: Optional[str] = Header(None), dpop: Optional[str] = Header(None)):
-    if not authorization or not authorization.startswith("DPoP "):
-        # Return 401 with resource_metadata fallback for unauthenticated requests
-        headers = {
-            "WWW-Authenticate": f'DPoP resource_metadata="{sanitize_url_for_header(request.base_url)}.well-known/oauth-protected-resource"'
-        }
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header. Expected DPoP bound token.", headers=headers)
-    
-    access_token = authorization[5:].strip()
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Empty DPoP token provided")
+    scheme, _, access_token = (authorization or "").partition(" ")
+    if scheme not in ("Bearer", "DPoP") or not access_token.strip():
+        raise HTTPException(status_code=401, detail="Missing access token", headers=challenge(request))
+    access_token = access_token.strip()
 
     # 1. Introspect token against Keycloak
     async with httpx.AsyncClient() as client:
@@ -112,53 +118,122 @@ async def verify_auth(request: Request, authorization: Optional[str] = Header(No
                 data={"token": access_token},
                 timeout=5.0
             )
-            if resp.status_code == 200:
-                introspection = resp.json()
-                if not introspection.get("active"):
-                    raise HTTPException(status_code=401, detail="Token is inactive or expired")
-            else:
-                raise HTTPException(status_code=401, detail="Token introspection failed at Keycloak")
+            if resp.status_code != 200:
+                raise HTTPException(status_code=401, detail="Token introspection failed at Keycloak", headers=challenge(request))
+            introspection = resp.json()
+            if not introspection.get("active"):
+                raise HTTPException(status_code=401, detail="Token is inactive or expired", headers=challenge(request, "invalid_token"))
+        except HTTPException:
+            raise
         except Exception as e:
             print(f"Introspection error: {e}")
-            if isinstance(e, HTTPException):
-                raise e
-            raise HTTPException(status_code=401, detail="Auth server unreachable")
+            raise HTTPException(status_code=401, detail="Auth server unreachable", headers=challenge(request))
 
-    # 2. Validate DPoP proof
+    # 2. Validate the DPoP proof and its binding to the token (cnf.jkt)
     url = str(request.url)
     try:
-        validate_dpop_proof(dpop, request.method, url, access_token)
+        jwk_data = validate_dpop_proof(dpop, request.method, url, access_token)
     except HTTPException as e:
         if e.status_code == 401:
-            headers = {
-                "WWW-Authenticate": f'DPoP error="invalid_token", resource_metadata="{sanitize_url_for_header(request.base_url)}.well-known/oauth-protected-resource"'
-            }
-            raise HTTPException(status_code=401, detail=e.detail, headers=headers)
-        raise e
+            raise HTTPException(status_code=401, detail=e.detail, headers=challenge(request, "invalid_token"))
+        raise
+    expected_jkt = (introspection.get("cnf") or {}).get("jkt")
+    if expected_jkt and jwk_thumbprint(jwk_data) != expected_jkt:
+        raise HTTPException(status_code=401, detail="DPoP key does not match the token", headers=challenge(request, "invalid_token"))
+
+
+def jwk_thumbprint(jwk: dict) -> str:
+    """RFC 7638 thumbprint of an EC P-256 JWK."""
+    canonical = json.dumps({"crv": jwk["crv"], "kty": jwk["kty"], "x": jwk["x"], "y": jwk["y"]}, separators=(",", ":"), sort_keys=True)
+    return base64.urlsafe_b64encode(hashlib.sha256(canonical.encode()).digest()).decode().rstrip("=")
 
 # --- Dynamic Discovery Endpoint ---
 
+@app.get("/.well-known/oauth-protected-resource/rpc")
 @app.get("/.well-known/oauth-protected-resource")
-@app.get("/.well-known/openid-configuration")
-async def discovery(request: Request):
-    # This resource server tells the proxy to use Keycloak for authentication.
-    # We use EXTERNAL_KEYCLOAK_URL so the client (host) can reach it.
+async def protected_resource_metadata(request: Request):
+    """RFC 9728 Protected Resource Metadata. The authorization server (Keycloak)
+    publishes its own metadata; MCP clients discover it from here."""
     return {
-        "issuer": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp",
-        "authorization_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/auth",
-        "token_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token",
-        "pushed_authorization_request_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/ext/par/request",
-        "introspection_endpoint": f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp/protocol/openid-connect/token/introspect",
-        "dpop_signing_alg_values_supported": ["ES256"]
+        "resource": f"{request.base_url}rpc",
+        "authorization_servers": [f"{EXTERNAL_KEYCLOAK_URL}/realms/mcp"],
+        "scopes_supported": ["openid"],
+        "bearer_methods_supported": ["header"],
+        "resource_name": "Mock MCP Server",
     }
 
 # --- MCP Endpoints ---
+
+MODERN_VERSION = "2026-07-28"
+SUPPORTED_VERSIONS = [MODERN_VERSION, "2025-11-25"]
+
+
+def rpc_error(status: int, id_, code: int, message: str, data=None):
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return JSONResponse(status_code=status, content={"jsonrpc": "2.0", "id": id_, "error": error})
+
+
+def decode_header(value: Optional[str]) -> Optional[str]:
+    if value and value.startswith("=?base64?") and value.endswith("?="):
+        return base64.b64decode(value[len("=?base64?"):-2]).decode()
+    return value
+
+
+def check_modern_headers(request: Request, payload: dict):
+    """MCP 2026-07-28 Streamable HTTP: headers must mirror the body."""
+    id_ = payload.get("id")
+    params = payload.get("params") or {}
+    version = params["_meta"]["io.modelcontextprotocol/protocolVersion"]
+    if request.headers.get("mcp-protocol-version") != version:
+        return rpc_error(400, id_, -32020, "Header mismatch: MCP-Protocol-Version")
+    if version not in SUPPORTED_VERSIONS:
+        return rpc_error(400, id_, -32022, "Unsupported protocol version",
+                         {"supported": SUPPORTED_VERSIONS, "requested": version})
+    if request.headers.get("mcp-method") != payload.get("method"):
+        return rpc_error(400, id_, -32020, "Header mismatch: Mcp-Method")
+    field = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}.get(payload.get("method"))
+    if field and decode_header(request.headers.get("mcp-name")) != params.get(field):
+        return rpc_error(400, id_, -32020, "Header mismatch: Mcp-Name")
+    return None
+
+
+@app.get("/rpc")
+@app.delete("/rpc")
+async def rpc_other_methods():
+    # 2026-07-28 has no standalone GET stream and no sessions.
+    return Response(status_code=405)
+
 
 @app.post("/rpc", dependencies=[Depends(verify_auth)])
 async def handle_rpc(request: Request):
     payload = await request.json()
     method = payload.get("method")
     print(f"DEBUG: Received RPC request - Method: {method}, Payload: {payload}")
+
+    meta = (payload.get("params") or {}).get("_meta") or {}
+    modern = "io.modelcontextprotocol/protocolVersion" in meta
+    if modern:
+        mismatch = check_modern_headers(request, payload)
+        if mismatch is not None:
+            return mismatch
+
+    if "id" not in payload:
+        # Notifications are acknowledged without a body.
+        return Response(status_code=202)
+
+    if modern and method == "server/discover":
+        return {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "result": {
+                "resultType": "complete",
+                "supportedVersions": SUPPORTED_VERSIONS,
+                "capabilities": {"tools": {"listChanged": True}},
+                "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "mock-mcp-server", "version": "1.0.0"}},
+            }
+        }
     
     if method == "initialize":
         requested_version = payload.get("params", {}).get("protocolVersion", "2024-11-05")
@@ -172,9 +247,6 @@ async def handle_rpc(request: Request):
             }
         }
     
-    if method == "notifications/initialized":
-        return Response(content="{}", media_type="application/json")
-
     if method == "tools/list":
         return {
             "jsonrpc": "2.0",
@@ -200,11 +272,7 @@ async def handle_rpc(request: Request):
                 }
             }
 
-    return {
-        "jsonrpc": "2.0",
-        "id": payload.get("id"),
-        "error": {"code": -32601, "message": "Method not found"}
-    }
+    return rpc_error(404 if modern else 200, payload.get("id"), -32601, "Method not found")
 
 @app.get("/sse", dependencies=[Depends(verify_auth)])
 async def sse_endpoint(request: Request):

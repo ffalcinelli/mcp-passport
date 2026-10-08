@@ -74,3 +74,98 @@ pub async fn start_chrome() -> anyhow::Result<ContainerAsync<GenericImage>> {
             )
         })
 }
+
+pub mod mcp_server;
+
+use mcp_passport::config::Config;
+use mcp_passport::vault::Vault;
+use serde_json::{json, Value};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines};
+
+/// A 2026-07-28 request with the required `_meta`.
+pub fn modern(id: impl Into<Value>, method: &str, params: Value) -> Value {
+    let mut params = params;
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": mcp_server::MODERN,
+        "io.modelcontextprotocol/clientInfo": {"name": "mcp-passport-tests", "version": "1.0.0"},
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    json!({"jsonrpc": "2.0", "id": id.into(), "method": method, "params": params})
+}
+
+/// Parses CLI arguments into a Config (the binary name is added).
+pub fn config(args: &[&str]) -> Config {
+    let mut all = vec!["mcp-passport"];
+    all.extend_from_slice(args);
+    <Config as clap::Parser>::try_parse_from(all).expect("valid test config")
+}
+
+/// Drives `mcp_passport::run_with_vault` through its stdio, like an MCP client.
+pub struct StdioClient {
+    writer: DuplexStream,
+    lines: Lines<BufReader<DuplexStream>>,
+    run: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl StdioClient {
+    pub fn start(config: Config, vault: Vault) -> Self {
+        let (writer, server_in) = tokio::io::duplex(1 << 20);
+        let (server_out, reader) = tokio::io::duplex(1 << 20);
+        let run = tokio::spawn(mcp_passport::run_with_vault(
+            config, vault, server_in, server_out,
+        ));
+        Self {
+            writer,
+            lines: BufReader::new(reader).lines(),
+            run,
+        }
+    }
+
+    pub async fn send(&mut self, msg: Value) {
+        self.writer
+            .write_all(format!("{msg}\n").as_bytes())
+            .await
+            .expect("write to proxy stdin");
+    }
+
+    /// The next message from the proxy, or None after `wait`.
+    pub async fn recv(&mut self, wait: Duration) -> Option<Value> {
+        match tokio::time::timeout(wait, self.lines.next_line()).await {
+            Ok(Ok(Some(line))) => Some(serde_json::from_str(&line).expect("proxy wrote JSON")),
+            _ => None,
+        }
+    }
+
+    /// Reads messages until the response with `id` arrives; returns it and the
+    /// messages seen before it.
+    pub async fn response(&mut self, id: impl Into<Value>, wait: Duration) -> (Value, Vec<Value>) {
+        let id = id.into();
+        let mut before = Vec::new();
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let msg = self
+                .recv(left)
+                .await
+                .unwrap_or_else(|| panic!("no response for id {id}; saw {before:?}"));
+            if msg.get("id") == Some(&id) && msg.get("method").is_none() {
+                return (msg, before);
+            }
+            before.push(msg);
+        }
+    }
+
+    /// Sends a request and waits for its response.
+    pub async fn call(&mut self, msg: Value, wait: Duration) -> Value {
+        let id = msg["id"].clone();
+        self.send(msg).await;
+        self.response(id, wait).await.0
+    }
+
+    /// Closes stdin and waits for the proxy to exit.
+    pub async fn close(self) -> anyhow::Result<()> {
+        drop(self.writer);
+        tokio::time::timeout(Duration::from_secs(15), self.run).await??
+    }
+}

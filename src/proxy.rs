@@ -324,7 +324,7 @@ impl Proxy {
                 if let Ok(mut slot) = self.negotiated_version.lock() {
                     *slot = Some(v.to_string());
                 }
-                let _ = self.legacy_session_tx.send(true);
+                self.legacy_session_tx.send_replace(true);
             }
         }
         if mcp::method_of(request) == Some("tools/list") && message.get("id") == request.get("id") {
@@ -657,7 +657,7 @@ impl Proxy {
                 info!("New MCP Session ID captured: {}", sid);
                 *sid_lock = Some(sid.to_string());
             }
-            let _ = self.legacy_session_tx.send(true);
+            self.legacy_session_tx.send_replace(true);
         }
 
         if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT {
