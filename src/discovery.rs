@@ -32,6 +32,9 @@ pub(crate) struct AuthServerMetadata {
     pub token_endpoint: String,
     pub pushed_authorization_request_endpoint: Option<String>,
     pub organization_name: Option<String>,
+    /// RFC 9207: the AS returns `iss` in the authorization response.
+    #[serde(default)]
+    pub authorization_response_iss_parameter_supported: bool,
 }
 
 /// The subset of RFC 9728 Protected Resource Metadata used by mcp-passport.
@@ -189,6 +192,7 @@ pub(crate) async fn discover_from_resource(
     client: &Client,
     resource: &str,
     resource_metadata_url: Option<&str>,
+    allow_insecure_http: bool,
 ) -> Result<Discovered> {
     let candidates = match resource_metadata_url {
         Some(u) => vec![Url::parse(u).with_context(|| format!("Invalid resource_metadata '{u}'"))?],
@@ -210,6 +214,7 @@ pub(crate) async fn discover_from_resource(
                 issuer
             );
         }
+        crate::net::require_secure_url(issuer, "authorization server", allow_insecure_http)?;
         let metadata = fetch_auth_server_metadata(client, issuer).await?;
         return Ok(Discovered {
             metadata,
@@ -359,7 +364,7 @@ mod tests {
         let base = serve(app).await;
         let client = Client::new();
 
-        let found = discover_from_resource(&client, &format!("{base}/rpc"), None)
+        let found = discover_from_resource(&client, &format!("{base}/rpc"), None, false)
             .await
             .unwrap();
         assert_eq!(found.metadata.issuer, format!("{base}/realms/mcp"));
@@ -395,6 +400,7 @@ mod tests {
             &Client::new(),
             &format!("{base}/rpc"),
             Some(&format!("{base}/meta")),
+            false,
         )
         .await
         .unwrap();
@@ -420,7 +426,7 @@ mod tests {
                 get(|| async { Json(as_doc("https://attacker.example.com")) }),
             );
         let base = serve(app).await;
-        let err = discover_from_resource(&Client::new(), &base, None)
+        let err = discover_from_resource(&Client::new(), &base, None, false)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("Issuer mismatch"), "{err:#}");
@@ -438,7 +444,7 @@ mod tests {
             }),
         );
         let base = serve(app).await;
-        let err = discover_from_resource(&Client::new(), &base, None)
+        let err = discover_from_resource(&Client::new(), &base, None, false)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("RFC 9728"), "{err:#}");
@@ -455,6 +461,7 @@ mod tests {
             &Client::new(),
             &format!("{base}/rpc"),
             Some(&format!("{base}/discovery")),
+            false,
         )
         .await
         .unwrap();
@@ -464,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn test_discovery_error_lists_tried_urls() {
         let base = serve(Router::new()).await;
-        let err = discover_from_resource(&Client::new(), &format!("{base}/rpc"), None)
+        let err = discover_from_resource(&Client::new(), &format!("{base}/rpc"), None, false)
             .await
             .unwrap_err();
         let msg = format!("{err:#}");

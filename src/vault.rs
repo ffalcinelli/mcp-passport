@@ -51,6 +51,16 @@ pub struct Vault {
     backend: Backend,
 }
 
+/// The keychain service name for a remote MCP server.
+///
+/// Credentials are scoped per server so a token issued for one resource is never
+/// sent to another (RFC 8707).
+pub fn service_name_for(remote_url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(remote_url.trim_end_matches('/').as_bytes());
+    format!("mcp-passport:{}", &hex::encode(digest)[..16])
+}
+
 impl Vault {
     /// Creates a vault backed by the OS keychain.
     pub fn keyring(service: &str) -> Self {
@@ -174,6 +184,15 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_service_name_for() {
+        let a = service_name_for("https://a.example.com/mcp");
+        assert!(a.starts_with("mcp-passport:"));
+        assert_eq!(a.len(), "mcp-passport:".len() + 16);
+        assert_eq!(a, service_name_for("https://a.example.com/mcp/"));
+        assert_ne!(a, service_name_for("https://b.example.com/mcp"));
+    }
 
     #[test]
     fn test_make_key() {

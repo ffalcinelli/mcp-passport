@@ -508,8 +508,8 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
         OidcConfig {
             client_id: "c".into(),
             redirect_url: "http://127.0.0.1:8081/callback".into(),
-            auth_url_override: Some("a".into()),
-            token_url_override: Some("t".into()),
+            auth_url_override: Some("http://127.0.0.1:1/auth".into()),
+            token_url_override: Some("http://127.0.0.1:1/token".into()),
             par_url_override: Some(par_url),
             ..Default::default()
         },

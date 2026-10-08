@@ -127,20 +127,37 @@ pub struct Config {
     )]
     pub log_level: String,
 
-    /// Directory for logs
+    /// Directory for logs [default: per-user state directory, e.g. ~/.local/state/mcp-passport/logs]
+    #[arg(long, env = "MCP_PASSPORT_LOG_DIR", help_heading = "Logging")]
+    pub log_dir: Option<std::path::PathBuf>,
+
+    /// Allow plain-HTTP MCP and authorization server URLs on non-loopback hosts (insecure)
     #[arg(
         long,
-        env = "MCP_PASSPORT_LOG_DIR",
-        default_value = "/tmp/mcp-passport",
-        help_heading = "Logging"
+        env = "MCP_PASSPORT_ALLOW_INSECURE_HTTP",
+        help_heading = "Server Configuration"
     )]
-    pub log_dir: String,
+    pub allow_insecure_http: bool,
 }
 
 impl Config {
     pub fn parse() -> Self {
         Parser::parse()
     }
+
+    /// The log directory: `--log-dir`, or a private per-user directory.
+    pub fn resolved_log_dir(&self) -> std::path::PathBuf {
+        self.log_dir.clone().unwrap_or_else(default_log_dir)
+    }
+}
+
+/// `$XDG_STATE_HOME/mcp-passport/logs` on Linux, the local data directory on
+/// macOS and Windows, and a per-user temp directory as a last resort.
+pub fn default_log_dir() -> std::path::PathBuf {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .map(|d| d.join("mcp-passport").join("logs"))
+        .unwrap_or_else(|| std::env::temp_dir().join("mcp-passport"))
 }
 
 #[cfg(test)]

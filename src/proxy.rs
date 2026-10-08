@@ -73,13 +73,13 @@ fn validate_resource_metadata(metadata_url: Option<&str>, remote_url: &str) -> O
         }
     };
 
-    if m_url.host_str() != r_url.host_str() || m_url.port() != r_url.port() {
+    // Same origin (scheme, host and port), so a challenge can neither point us
+    // at another host (SSRF) nor downgrade https to http.
+    if m_url.origin() != r_url.origin() {
         warn!(
-            "SSRF Prevention: resource_metadata host/port ({:?}:{:?}) does not match remote host/port ({:?}:{:?}). Rejecting.",
-            m_url.host_str(),
-            m_url.port(),
-            r_url.host_str(),
-            r_url.port()
+            "SSRF Prevention: resource_metadata origin {} does not match remote origin {}. Rejecting.",
+            m_url.origin().ascii_serialization(),
+            r_url.origin().ascii_serialization()
         );
         return None;
     }
@@ -755,37 +755,32 @@ mod tests {
     #[test]
     fn test_validate_resource_metadata() {
         let remote_url = "http://localhost:8081/rpc";
+        let check = |m: &str| validate_resource_metadata(Some(m), remote_url);
 
-        // Match
-        let valid = validate_resource_metadata(Some("http://localhost:8081/discovery"), remote_url);
-        assert_eq!(valid, Some("http://localhost:8081/discovery".to_string()));
+        assert_eq!(
+            check("http://localhost:8081/discovery"),
+            Some("http://localhost:8081/discovery".to_string())
+        );
+        assert_eq!(check("http://attacker.com/evil"), None);
+        assert_eq!(check("http://test.localhost:8081/discovery"), None);
+        assert_eq!(check("http://localhost:8082/discovery"), None);
+        assert_eq!(check("not_a_valid_url"), None);
+        assert_eq!(validate_resource_metadata(None, remote_url), None);
+        assert_eq!(
+            validate_resource_metadata(Some("http://localhost:8081/d"), "not_a_valid_url"),
+            None
+        );
 
-        // Mismatch
-        let invalid = validate_resource_metadata(Some("http://attacker.com/evil"), remote_url);
-        assert_eq!(invalid, None);
-
-        // Missing
-        let missing = validate_resource_metadata(None, remote_url);
-        assert_eq!(missing, None);
-
-        // Invalid metadata URL (parsing fails)
-        let invalid_metadata_url = validate_resource_metadata(Some("not_a_valid_url"), remote_url);
-        assert_eq!(invalid_metadata_url, None);
-
-        // Invalid remote URL (parsing fails)
-        let invalid_remote_url =
-            validate_resource_metadata(Some("http://localhost:8081/discovery"), "not_a_valid_url");
-        assert_eq!(invalid_remote_url, None);
-
-        // Subdomain mismatch
-        let subdomain_mismatch =
-            validate_resource_metadata(Some("http://test.localhost:8081/discovery"), remote_url);
-        assert_eq!(subdomain_mismatch, None);
-
-        // Different ports, but hosts match
-        let different_port =
-            validate_resource_metadata(Some("http://localhost:8082/discovery"), remote_url);
-        assert_eq!(different_port, None);
+        // Scheme downgrade and default-port equivalence.
+        let https = "https://mcp.example.com/rpc";
+        assert_eq!(
+            validate_resource_metadata(Some("http://mcp.example.com/meta"), https),
+            None
+        );
+        assert_eq!(
+            validate_resource_metadata(Some("https://mcp.example.com:443/meta"), https),
+            Some("https://mcp.example.com:443/meta".to_string())
+        );
     }
 
     #[tokio::test]

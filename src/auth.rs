@@ -11,6 +11,7 @@
 
 use crate::crypto::DpopKey;
 use crate::discovery;
+use crate::net;
 use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
@@ -55,6 +56,8 @@ pub struct OidcConfig {
     pub template_dir: Option<std::path::PathBuf>,
     /// Timeouts and retry delays used by the auth flow and the SSE listener.
     pub timeouts: Timeouts,
+    /// Accept plain-HTTP authorization server endpoints on non-loopback hosts.
+    pub allow_insecure_http: bool,
 }
 
 impl Default for OidcConfig {
@@ -70,6 +73,7 @@ impl Default for OidcConfig {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             template_dir: None,
             timeouts: Timeouts::default(),
+            allow_insecure_http: false,
         }
     }
 }
@@ -123,6 +127,7 @@ impl std::fmt::Debug for OidcConfig {
             .field("redirect_url", &self.redirect_url)
             .field("template_dir", &self.template_dir)
             .field("timeouts", &self.timeouts)
+            .field("allow_insecure_http", &self.allow_insecure_http)
             .finish()
     }
 }
@@ -160,12 +165,20 @@ pub struct AuthManager {
     resource_name: String,
     /// Timeouts for the interactive flow.
     timeouts: Timeouts,
+    /// The authorization server's issuer identifier, when discovered.
+    issuer: Option<String>,
+    /// Whether the AS always returns `iss` in the authorization response (RFC 9207).
+    iss_required: bool,
 }
 
-#[derive(Deserialize)]
+/// Query parameters of the authorization response (RFC 6749 §4.1.2, RFC 9207).
+#[derive(Deserialize, Default)]
 struct AuthCallback {
-    code: String,
-    state: String,
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+    iss: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -200,13 +213,18 @@ impl AuthManager {
             (None, None)
         } else if let Some(url) = oidc_config.discovery_url.as_deref() {
             info!("Using configured OIDC discovery URL {}", url);
+            net::require_secure_url(url, "OIDC discovery URL", oidc_config.allow_insecure_http)?;
             let metadata = discovery::fetch_configured_metadata(&http_client, url).await?;
             (Some(metadata), None)
         } else {
             info!("Discovering the authorization server for {}...", resource);
-            let found =
-                discovery::discover_from_resource(&http_client, &resource, resource_metadata_url)
-                    .await?;
+            let found = discovery::discover_from_resource(
+                &http_client,
+                &resource,
+                resource_metadata_url,
+                oidc_config.allow_insecure_http,
+            )
+            .await?;
             (Some(found.metadata), found.resource_name)
         };
 
@@ -232,6 +250,18 @@ impl AuthManager {
                 "Authorization server metadata has no pushed_authorization_request_endpoint \
                  and no --kc-par-url override was provided",
             )?;
+        for (url, what) in [
+            (&auth_url, "authorization endpoint"),
+            (&token_url, "token endpoint"),
+            (&par_url, "PAR endpoint"),
+        ] {
+            net::require_secure_url(url, what, oidc_config.allow_insecure_http)?;
+        }
+
+        let issuer = metadata.as_ref().map(|m| m.issuer.clone());
+        let iss_required = metadata
+            .as_ref()
+            .is_some_and(|m| m.authorization_response_iss_parameter_supported);
         let issuer_name = metadata
             .map(|m| m.organization_name.unwrap_or(m.issuer))
             .unwrap_or_else(|| "Custom Provider".to_string());
@@ -273,6 +303,8 @@ impl AuthManager {
             issuer_name,
             resource_name,
             timeouts: oidc_config.timeouts,
+            issuer,
+            iss_required,
         })
     }
 
@@ -298,9 +330,9 @@ impl AuthManager {
             user_id
         );
 
-        // 1. Generate and store new ephemeral DPoP key
+        // 1. Generate a new ephemeral DPoP key. It is only stored once the token
+        // exchange succeeds, so a failed flow leaves the current credentials intact.
         let dpop_key = DpopKey::generate();
-        self.vault.store_dpop_key(user_id, &dpop_key.to_bytes())?;
 
         // 2. Prepare PKCE and State
         let pkce_verifier = random_urlsafe(32);
@@ -323,14 +355,13 @@ impl AuthManager {
         }
 
         // 6. Wait for code from callback
-        let code = match tokio::time::timeout(self.timeouts.auth, rx).await {
-            Ok(Ok(c)) => c,
-            _ => {
-                server_handle.abort();
-                anyhow::bail!("Authentication timed out or failed to receive callback");
-            }
-        };
+        let callback = tokio::time::timeout(self.timeouts.auth, rx).await;
         server_handle.abort();
+        let code = match callback {
+            Ok(Ok(Ok(code))) => code,
+            Ok(Ok(Err(reason))) => anyhow::bail!("Authorization failed: {}", reason),
+            _ => anyhow::bail!("Authentication timed out or failed to receive callback"),
+        };
 
         // 7. Token Exchange with DPoP
         info!("Step 2: Exchanging code for DPoP-bound token...");
@@ -343,8 +374,12 @@ impl AuthManager {
     async fn setup_loopback_server(
         &self,
         expected_state: String,
-    ) -> Result<(tokio::task::JoinHandle<()>, oneshot::Receiver<String>)> {
-        let (tx, rx) = oneshot::channel::<String>();
+    ) -> Result<(
+        tokio::task::JoinHandle<()>,
+        oneshot::Receiver<CallbackResult>,
+    )> {
+        let redirect = net::require_loopback_redirect(&self.redirect_url)?;
+        let (tx, rx) = oneshot::channel::<CallbackResult>();
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
         let app = Router::new()
@@ -356,11 +391,11 @@ impl AuthManager {
                 failure_html: self.failure_html.clone(),
                 issuer_name: self.issuer_name.clone(),
                 resource_name: self.resource_name.clone(),
+                expected_issuer: self.issuer.clone(),
+                iss_required: self.iss_required,
             });
 
-        let addr: SocketAddr = self
-            .redirect_url
-            .parse::<url::Url>()?
+        let addr: SocketAddr = redirect
             .socket_addrs(|| None)?
             .first()
             .copied()
@@ -560,6 +595,7 @@ impl AuthManager {
                 other
             ),
         }
+        self.vault.store_dpop_key(user_id, &dpop_key.to_bytes())?;
         self.vault.store_token(user_id, &data.access_token)?;
         info!("Successfully acquired and stored DPoP-bound token.");
 
@@ -572,52 +608,114 @@ impl AuthManager {
     }
 }
 
+/// What the loopback callback delivers: the authorization code, or why it failed.
+type CallbackResult = std::result::Result<String, String>;
+
 #[derive(Clone)]
 struct AuthServerState {
     expected_state: String,
-    tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+    tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<CallbackResult>>>>,
     success_html: Arc<String>,
     failure_html: Arc<String>,
     issuer_name: String,
     resource_name: String,
+    /// Issuer the `iss` response parameter must match (RFC 9207).
+    expected_issuer: Option<String>,
+    /// Reject responses without `iss` (the AS advertised support for it).
+    iss_required: bool,
+}
+
+/// Checks an authorization response whose `state` already matched.
+fn evaluate_callback(query: &AuthCallback, state: &AuthServerState) -> CallbackResult {
+    // RFC 9207: a mismatching `iss` means the response comes from another AS
+    // (mix-up attack), so it is checked before anything else is trusted.
+    match (&query.iss, &state.expected_issuer) {
+        (Some(iss), Some(expected)) if iss != expected => {
+            return Err(format!(
+                "issuer mismatch in authorization response ('{iss}', expected '{expected}')"
+            ));
+        }
+        (None, Some(_)) if state.iss_required => {
+            return Err("authorization response is missing the 'iss' parameter".into());
+        }
+        _ => {}
+    }
+    if let Some(error) = &query.error {
+        return Err(match &query.error_description {
+            Some(desc) => format!("{error}: {desc}"),
+            None => error.clone(),
+        });
+    }
+    query
+        .code
+        .clone()
+        .ok_or_else(|| "authorization response has no code".to_string())
 }
 
 async fn handle_callback(
     query: Query<AuthCallback>,
     State(state): State<AuthServerState>,
 ) -> impl IntoResponse {
-    if query.state != state.expected_state {
+    let render_failure = |status: axum::http::StatusCode, message: &str| {
         let html = render_template(
             &state.failure_html,
-            Some("Invalid state"),
+            Some(message),
             &state.issuer_name,
             &state.resource_name,
         );
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            axum::response::Html(html),
-        )
-            .into_response();
+        (status, axum::response::Html(html)).into_response()
+    };
+
+    // Requests without the right state are not ours: ignore them without
+    // ending the flow, so a stray page can't cancel the login.
+    if query.state.as_deref() != Some(state.expected_state.as_str()) {
+        return render_failure(axum::http::StatusCode::BAD_REQUEST, "Invalid state");
     }
-    let mut lock = state.tx.lock().await;
-    if let Some(s) = lock.take() {
-        let _ = s.send(query.code.clone());
-        let html = render_template(
-            &state.success_html,
-            None,
-            &state.issuer_name,
-            &state.resource_name,
+
+    let Some(sender) = state.tx.lock().await.take() else {
+        return render_failure(
+            axum::http::StatusCode::GONE,
+            "Already authenticated or timed out.",
         );
-        (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
-    } else {
-        let html = render_template(
-            &state.failure_html,
-            Some("Already authenticated or timed out."),
-            &state.issuer_name,
-            &state.resource_name,
-        );
-        (axum::http::StatusCode::GONE, axum::response::Html(html)).into_response()
+    };
+
+    let result = evaluate_callback(&query, &state);
+    let outcome = match &result {
+        Ok(_) => None,
+        Err(reason) => Some(format!("Authorization failed: {reason}")),
+    };
+    let _ = sender.send(result);
+
+    match outcome {
+        None => {
+            let html = render_template(
+                &state.success_html,
+                None,
+                &state.issuer_name,
+                &state.resource_name,
+            );
+            (axum::http::StatusCode::OK, axum::response::Html(html)).into_response()
+        }
+        Some(message) => render_failure(axum::http::StatusCode::BAD_REQUEST, &message),
     }
+}
+
+fn escape_html(s: &str) -> String {
+    html_escape::encode_safe(s).to_string()
+}
+
+fn render_template(
+    template: &str,
+    error_message: Option<&str>,
+    issuer_name: &str,
+    resource_name: &str,
+) -> String {
+    let mut result = template.replace("{{ISSUER_NAME}}", &escape_html(issuer_name));
+    result = result.replace("{{RESOURCE_NAME}}", &escape_html(resource_name));
+    if let Some(msg) = error_message {
+        result = result.replace("{{ERROR_MESSAGE}}", &escape_html(msg));
+    }
+    result
 }
 
 /// Builds the authorization URL for a PAR `request_uri` (RFC 9126 §4),
@@ -642,24 +740,6 @@ fn random_urlsafe(len: usize) -> String {
 /// PKCE S256 code challenge (RFC 7636 §4.2).
 fn pkce_s256_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
-}
-
-fn escape_html(s: &str) -> String {
-    html_escape::encode_safe(s).to_string()
-}
-
-fn render_template(
-    template: &str,
-    error_message: Option<&str>,
-    issuer_name: &str,
-    resource_name: &str,
-) -> String {
-    let mut result = template.replace("{{ISSUER_NAME}}", &escape_html(issuer_name));
-    result = result.replace("{{RESOURCE_NAME}}", &escape_html(resource_name));
-    if let Some(msg) = error_message {
-        result = result.replace("{{ERROR_MESSAGE}}", &escape_html(msg));
-    }
-    result
 }
 
 #[cfg(test)]
@@ -734,6 +814,8 @@ mod tests {
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
         };
 
         let (tx, _rx) = oneshot::channel::<SocketAddr>();
@@ -745,7 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_callback_success() {
-        let (tx, mut rx) = oneshot::channel::<String>();
+        let (tx, mut rx) = oneshot::channel::<CallbackResult>();
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
@@ -753,16 +835,19 @@ mod tests {
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
+            expected_issuer: None,
+            iss_required: false,
         };
 
         let query = Query(AuthCallback {
-            code: "test_code".to_string(),
-            state: "test_state".to_string(),
+            code: Some("test_code".into()),
+            state: Some("test_state".into()),
+            ..Default::default()
         });
 
         let response = handle_callback(query, State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert_eq!(rx.try_recv().unwrap(), "test_code");
+        assert_eq!(rx.try_recv().unwrap(), Ok("test_code".to_string()));
     }
 
     #[tokio::test]
@@ -772,7 +857,7 @@ mod tests {
         tokio::fs::write(temp_dir.join("success.html"), "SUCCESS {{RESOURCE_NAME}}").await?;
         tokio::fs::write(temp_dir.join("failure.html"), "FAILURE {{ERROR_MESSAGE}}").await?;
 
-        let (tx, mut rx) = oneshot::channel::<String>();
+        let (tx, mut rx) = oneshot::channel::<CallbackResult>();
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
@@ -788,12 +873,15 @@ mod tests {
             ),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
+            expected_issuer: None,
+            iss_required: false,
         };
 
         // 1. Success case
         let query_ok = Query(AuthCallback {
-            code: "test_code".to_string(),
-            state: "test_state".to_string(),
+            code: Some("test_code".into()),
+            state: Some("test_state".into()),
+            ..Default::default()
         });
         let res_ok = handle_callback(query_ok, State(state.clone()))
             .await
@@ -803,12 +891,13 @@ mod tests {
             .await
             .unwrap();
         assert!(String::from_utf8_lossy(&body_ok).contains("SUCCESS Test Resource"));
-        assert_eq!(rx.try_recv().unwrap(), "test_code");
+        assert_eq!(rx.try_recv().unwrap(), Ok("test_code".to_string()));
 
         // 2. Invalid state case
         let query_err = Query(AuthCallback {
-            code: "c".to_string(),
-            state: "wrong".to_string(),
+            code: Some("c".into()),
+            state: Some("wrong".into()),
+            ..Default::default()
         });
         let res_err = handle_callback(query_err, State(state.clone()))
             .await
@@ -821,8 +910,9 @@ mod tests {
 
         // 3. Already authenticated case (tx taken)
         let query_gone = Query(AuthCallback {
-            code: "c".to_string(),
-            state: "test_state".to_string(),
+            code: Some("c".into()),
+            state: Some("test_state".into()),
+            ..Default::default()
         });
         let res_gone = handle_callback(query_gone, State(state.clone()))
             .await
@@ -839,7 +929,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_callback_invalid_state() {
-        let (tx, _rx) = oneshot::channel::<String>();
+        let (tx, _rx) = oneshot::channel::<CallbackResult>();
         let state = AuthServerState {
             expected_state: "expected".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
@@ -847,11 +937,14 @@ mod tests {
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             issuer_name: "Test Issuer".to_string(),
             resource_name: "Test Resource".to_string(),
+            expected_issuer: None,
+            iss_required: false,
         };
 
         let query = Query(AuthCallback {
-            code: "code".to_string(),
-            state: "wrong".to_string(),
+            code: Some("code".into()),
+            state: Some("wrong".into()),
+            ..Default::default()
         });
 
         let response = handle_callback(query, State(state)).await.into_response();
@@ -860,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_callback_xss_prevention() -> Result<()> {
-        let (tx, _rx) = oneshot::channel::<String>();
+        let (tx, _rx) = oneshot::channel::<CallbackResult>();
         let state = AuthServerState {
             expected_state: "test_state".to_string(),
             tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
@@ -868,12 +961,15 @@ mod tests {
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             issuer_name: "<script>alert('xss')</script>".to_string(),
             resource_name: "<b>Bold Resource</b>".to_string(),
+            expected_issuer: None,
+            iss_required: false,
         };
 
         // 1. Invalid state case (triggering failure template)
         let query_err = Query(AuthCallback {
-            code: "c".to_string(),
-            state: "wrong".to_string(),
+            code: Some("c".into()),
+            state: Some("wrong".into()),
+            ..Default::default()
         });
         let res_err = handle_callback(query_err, State(state.clone()))
             .await
@@ -889,6 +985,223 @@ mod tests {
         assert!(!html_err.contains("<b>"));
 
         Ok(())
+    }
+
+    fn callback_state(
+        tx: oneshot::Sender<CallbackResult>,
+        expected_issuer: Option<&str>,
+        iss_required: bool,
+    ) -> AuthServerState {
+        AuthServerState {
+            expected_state: "st".to_string(),
+            tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+            success_html: Arc::new("OK".to_string()),
+            failure_html: Arc::new("FAIL {{ERROR_MESSAGE}}".to_string()),
+            issuer_name: "Issuer".to_string(),
+            resource_name: "Resource".to_string(),
+            expected_issuer: expected_issuer.map(str::to_string),
+            iss_required,
+        }
+    }
+
+    async fn body_of(res: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    #[tokio::test]
+    async fn test_handle_callback_error_fails_flow_immediately() {
+        let (tx, mut rx) = oneshot::channel::<CallbackResult>();
+        let query = Query(AuthCallback {
+            state: Some("st".into()),
+            error: Some("access_denied".into()),
+            error_description: Some("User <denied>".into()),
+            ..Default::default()
+        });
+        let res = handle_callback(query, State(callback_state(tx, None, false)))
+            .await
+            .into_response();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(res)
+            .await
+            .contains("access_denied: User &lt;denied&gt;"));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Err("access_denied: User <denied>".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_callback_error_with_wrong_state_is_ignored() {
+        let (tx, mut rx) = oneshot::channel::<CallbackResult>();
+        let query = Query(AuthCallback {
+            state: Some("other".into()),
+            error: Some("access_denied".into()),
+            ..Default::default()
+        });
+        let res = handle_callback(query, State(callback_state(tx, None, false)))
+            .await
+            .into_response();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
+        // The flow is still waiting for the real response.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_callback_missing_state_is_ignored() {
+        let (tx, mut rx) = oneshot::channel::<CallbackResult>();
+        let query = Query(AuthCallback {
+            code: Some("c".into()),
+            ..Default::default()
+        });
+        let res = handle_callback(query, State(callback_state(tx, None, false)))
+            .await
+            .into_response();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_evaluate_callback_issuer_checks() {
+        let ok = |iss: Option<&str>, expected: Option<&str>, required: bool| {
+            let (tx, _rx) = oneshot::channel::<CallbackResult>();
+            let query = AuthCallback {
+                code: Some("c".into()),
+                state: Some("st".into()),
+                iss: iss.map(str::to_string),
+                ..Default::default()
+            };
+            evaluate_callback(&query, &callback_state(tx, expected, required))
+        };
+        let issuer = Some("https://as.example.com");
+        assert_eq!(ok(issuer, issuer, true), Ok("c".to_string()));
+        assert_eq!(ok(issuer, issuer, false), Ok("c".to_string()));
+        assert_eq!(ok(None, issuer, false), Ok("c".to_string()));
+        assert_eq!(ok(None, None, true), Ok("c".to_string()));
+        assert!(ok(Some("https://evil.example.com"), issuer, false)
+            .unwrap_err()
+            .contains("issuer mismatch"));
+        assert!(ok(None, issuer, true)
+            .unwrap_err()
+            .contains("missing the 'iss'"));
+    }
+
+    #[test]
+    fn test_evaluate_callback_issuer_mismatch_beats_error() {
+        let (tx, _rx) = oneshot::channel::<CallbackResult>();
+        let query = AuthCallback {
+            state: Some("st".into()),
+            error: Some("access_denied".into()),
+            iss: Some("https://evil.example.com".into()),
+            ..Default::default()
+        };
+        let state = callback_state(tx, Some("https://as.example.com"), false);
+        assert!(evaluate_callback(&query, &state)
+            .unwrap_err()
+            .contains("issuer mismatch"));
+    }
+
+    #[test]
+    fn test_evaluate_callback_requires_code() {
+        let (tx, _rx) = oneshot::channel::<CallbackResult>();
+        let query = AuthCallback {
+            state: Some("st".into()),
+            ..Default::default()
+        };
+        assert!(evaluate_callback(&query, &callback_state(tx, None, false)).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_reauthenticate_rejects_non_loopback_redirect() {
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "http://localhost/auth".into(),
+            token_url: "http://localhost/token".into(),
+            par_url: "http://localhost/par".into(),
+            redirect_url: "http://0.0.0.0:8082/callback".into(),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::in_memory("svc"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            issuer_name: "Mock Issuer".into(),
+            resource_name: "Mock Resource".into(),
+            success_html: Arc::new(String::new()),
+            failure_html: Arc::new(String::new()),
+            timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
+        };
+        let err = am.reauthenticate("user", None, None).await.unwrap_err();
+        assert!(err.to_string().contains("RFC 8252"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_failed_flow_keeps_existing_credentials() {
+        // A PAR failure must not replace the stored DPoP key.
+        let vault = Vault::in_memory("svc");
+        vault.store_token("user", "old-token").unwrap();
+        vault.store_dpop_key("user", &[7u8; 32]).unwrap();
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "http://localhost:1/auth".into(),
+            token_url: "http://localhost:1/token".into(),
+            par_url: "http://localhost:1/par".into(),
+            redirect_url: "http://127.0.0.1:0/callback".into(),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: vault.clone(),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            issuer_name: "Mock Issuer".into(),
+            resource_name: "Mock Resource".into(),
+            success_html: Arc::new(String::new()),
+            failure_html: Arc::new(String::new()),
+            timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
+        };
+        assert!(am.reauthenticate("user", None, None).await.is_err());
+        assert_eq!(vault.get_dpop_key("user").unwrap(), Some(vec![7u8; 32]));
+        assert_eq!(vault.get_token("user").unwrap(), Some("old-token".into()));
+    }
+
+    #[tokio::test]
+    async fn test_discover_rejects_insecure_endpoints() {
+        let config = OidcConfig {
+            client_id: "c".into(),
+            redirect_url: "http://127.0.0.1:1/callback".into(),
+            auth_url_override: Some("http://as.example.com/auth".into()),
+            token_url_override: Some("https://as.example.com/token".into()),
+            par_url_override: Some("https://as.example.com/par".into()),
+            ..Default::default()
+        };
+        let err = AuthManager::discover(
+            config.clone(),
+            "https://mcp.example.com".into(),
+            Vault::in_memory("svc"),
+            None,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("must use HTTPS"), "{err}");
+
+        let allowed = OidcConfig {
+            allow_insecure_http: true,
+            ..config
+        };
+        // The insecure endpoint is accepted when explicitly allowed (the resource
+        // name lookup fails quietly against the unreachable host).
+        let am = AuthManager::discover(
+            allowed,
+            "http://127.0.0.1:1/rpc".into(),
+            Vault::in_memory("svc"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(am.auth_url, "http://as.example.com/auth");
     }
 
     #[tokio::test]
@@ -909,6 +1222,8 @@ mod tests {
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
         };
 
         let (tx, _rx) = oneshot::channel::<String>();
@@ -936,6 +1251,8 @@ mod tests {
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
         };
         am.vault.store_token("user", "token")?;
 
@@ -963,10 +1280,10 @@ mod tests {
             "/oidc",
             get(|| async {
                 axum::Json(serde_json::json!({
-                    "issuer": "http://configured.example.com",
-                    "authorization_endpoint": "http://configured.example.com/auth",
-                    "token_endpoint": "http://configured.example.com/token",
-                    "pushed_authorization_request_endpoint": "http://configured.example.com/par"
+                    "issuer": "https://configured.example.com",
+                    "authorization_endpoint": "https://configured.example.com/auth",
+                    "token_endpoint": "https://configured.example.com/token",
+                    "pushed_authorization_request_endpoint": "https://configured.example.com/par"
                 }))
             }),
         );
@@ -991,8 +1308,8 @@ mod tests {
             Some(&format!("{base}/missing")),
         )
         .await?;
-        assert_eq!(am.token_url, "http://configured.example.com/token");
-        assert_eq!(am.par_url, "http://configured.example.com/par");
+        assert_eq!(am.token_url, "https://configured.example.com/token");
+        assert_eq!(am.par_url, "https://configured.example.com/par");
         Ok(())
     }
 
@@ -1001,9 +1318,9 @@ mod tests {
         let config = OidcConfig {
             client_id: "c".into(),
             redirect_url: "http://127.0.0.1:1/callback".into(),
-            auth_url_override: Some("http://as/auth".into()),
-            token_url_override: Some("http://as/token".into()),
-            par_url_override: Some("http://as/par".into()),
+            auth_url_override: Some("https://as/auth".into()),
+            token_url_override: Some("https://as/token".into()),
+            par_url_override: Some("https://as/par".into()),
             ..Default::default()
         };
         let am = AuthManager::discover(
@@ -1036,6 +1353,8 @@ mod tests {
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
         };
         let key = crate::crypto::DpopKey::generate();
         let res = am
@@ -1066,6 +1385,8 @@ mod tests {
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
         };
 
         // This should fail after 5 retries because the port is occupied by 'listener'
@@ -1105,6 +1426,8 @@ mod tests {
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
             timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
         };
 
         // Mock PAR response

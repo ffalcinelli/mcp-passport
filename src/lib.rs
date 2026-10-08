@@ -3,6 +3,8 @@ mod challenge;
 pub mod config;
 pub mod crypto;
 mod discovery;
+pub mod logging;
+mod net;
 pub mod proxy;
 pub mod templates;
 pub mod vault;
@@ -27,8 +29,28 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let vault = Vault::from_env("mcp-passport");
+    let vault = Vault::from_env(&vault::service_name_for(&config.remote_mcp_url));
     run_with_vault(config, vault, stdin, stdout).await
+}
+
+/// Checks the URL policy before anything is sent over the network.
+pub fn validate_config(config: &Config) -> Result<()> {
+    let allow = config.allow_insecure_http;
+    net::require_secure_url(&config.remote_mcp_url, "--remote-mcp-url", allow)?;
+    let optional = [
+        (&config.remote_sse_url, "--remote-sse-url"),
+        (&config.oidc_discovery_url, "--oidc-discovery-url"),
+        (&config.kc_auth_url, "--kc-auth-url"),
+        (&config.kc_token_url, "--kc-token-url"),
+        (&config.kc_par_url, "--kc-par-url"),
+    ];
+    for (url, what) in optional {
+        if let Some(url) = url {
+            net::require_secure_url(url, what, allow)?;
+        }
+    }
+    net::require_loopback_redirect(&config.oidc_redirect_url)?;
+    Ok(())
 }
 
 /// Runs the proxy with an explicit vault.
@@ -42,6 +64,8 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    validate_config(&config)?;
+
     let (stdout_tx, mut stdout_rx) = mpsc::channel::<String>(100);
 
     // Dedicated stdout writer task
@@ -66,6 +90,7 @@ where
         token_url_override: config.kc_token_url.clone(),
         par_url_override: config.kc_par_url.clone(),
         template_dir: config.template_dir.clone(),
+        allow_insecure_http: config.allow_insecure_http,
         timeouts: Timeouts {
             auth: std::time::Duration::from_secs(config.auth_timeout_secs),
             ..Default::default()
@@ -259,6 +284,47 @@ mod tests {
         Ok(vault)
     }
 
+    #[test]
+    fn test_validate_config() {
+        use clap::Parser;
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["mcp-passport"];
+            args.extend_from_slice(extra);
+            Config::try_parse_from(args).unwrap()
+        };
+        assert!(
+            validate_config(&parse(&["--remote-mcp-url", "https://mcp.example.com/mcp"])).is_ok()
+        );
+        assert!(
+            validate_config(&parse(&["--remote-mcp-url", "http://127.0.0.1:8081/rpc"])).is_ok()
+        );
+
+        let insecure = parse(&["--remote-mcp-url", "http://mcp.example.com/mcp"]);
+        assert!(validate_config(&insecure).is_err());
+        let allowed = parse(&[
+            "--remote-mcp-url",
+            "http://mcp.example.com/mcp",
+            "--allow-insecure-http",
+        ]);
+        assert!(validate_config(&allowed).is_ok());
+
+        let bad_override = parse(&[
+            "--remote-mcp-url",
+            "https://mcp.example.com/mcp",
+            "--kc-token-url",
+            "http://as.example.com/token",
+        ]);
+        assert!(validate_config(&bad_override).is_err());
+
+        let bad_redirect = parse(&[
+            "--remote-mcp-url",
+            "https://mcp.example.com/mcp",
+            "--oidc-redirect-url",
+            "http://0.0.0.0:8082/callback",
+        ]);
+        assert!(validate_config(&bad_redirect).is_err());
+    }
+
     #[tokio::test]
     async fn test_process_message_failure_becomes_jsonrpc_error() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(1);
@@ -405,7 +471,8 @@ mod tests {
             kc_token_url: Some("http://localhost:1/token".into()),
             kc_par_url: Some("http://localhost:1/par".into()),
             log_level: "info".into(),
-            log_dir: "/tmp/mcp-passport".into(),
+            log_dir: None,
+            allow_insecure_http: false,
             template_dir: None,
             mcp_protocol_version: "2025-11-25".into(),
             auth_scheme: AuthScheme::Bearer,
