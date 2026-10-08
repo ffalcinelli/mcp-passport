@@ -812,6 +812,9 @@ impl Proxy {
         let _guard = self.reauth_mutex.lock().await;
 
         let mut allow_refresh = !step_up;
+        // A token from a browser login was rejected right away: only a silent
+        // refresh may be tried; another browser login would likely loop.
+        let mut refresh_only = false;
         {
             let state = self.reauth_state.lock().await;
             let current_gen = self.generation();
@@ -834,6 +837,11 @@ impl Proxy {
                     if last.via_refresh {
                         info!("The refreshed token was rejected; falling back to a new login.");
                         allow_refresh = false;
+                    } else if allow_refresh
+                        && self.vault.get_refresh_token(&self.user_id)?.is_some()
+                    {
+                        info!("A fresh token was rejected; trying a silent refresh.");
+                        refresh_only = true;
                     } else {
                         error!(
                             "Authentication loop detected: a token obtained {:?} ago was rejected.",
@@ -857,6 +865,12 @@ impl Proxy {
             auth_manager.enforce_issuer_binding(&self.user_id)?;
             if allow_refresh && auth_manager.refresh(&self.user_id).await? {
                 return Ok(Some(true));
+            }
+            if refresh_only {
+                anyhow::bail!(
+                    "Authentication loop detected: the server rejected a freshly issued token. \
+                     Please check your credentials and environment configuration."
+                );
             }
             if reason == ReauthReason::Expiring {
                 // No refresh possible: keep the current token until it is rejected.
@@ -1308,6 +1322,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Authentication loop detected"));
+
+        // With a refresh token, a silent refresh is tried first (which fails
+        // here for lack of discovery, with a different error).
+        proxy.vault.store_refresh_token("user", "r")?;
+        let err = proxy
+            .trigger_reauth(1, None, None, ReauthReason::Unauthorized)
+            .await
+            .unwrap_err();
+        assert!(
+            !err.to_string().contains("Authentication loop detected"),
+            "{err}"
+        );
+        proxy.vault.delete_refresh_token("user")?;
 
         // A rejected *refreshed* token is not a loop: it falls back to a login
         // (which fails here for lack of discovery, with a different error).

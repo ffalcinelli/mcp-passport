@@ -95,6 +95,7 @@ where
         template_dir: config.template_dir.clone(),
         allow_insecure_http: config.allow_insecure_http,
         expected_issuer: config.oidc_issuer.clone(),
+        request_offline_access: config.oidc_offline_access,
         timeouts: Timeouts {
             auth: std::time::Duration::from_secs(config.auth_timeout_secs),
             ..Default::default()
@@ -681,6 +682,7 @@ mod tests {
             log_dir: None,
             allow_insecure_http: false,
             oidc_issuer: None,
+            oidc_offline_access: false,
             template_dir: None,
             mcp_protocol_version: "2025-11-25".into(),
             auth_scheme: AuthScheme::Bearer,

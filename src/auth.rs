@@ -61,6 +61,10 @@ pub struct OidcConfig {
     /// The issuer the (pre-registered) client belongs to. Discovery must find
     /// exactly this authorization server.
     pub expected_issuer: Option<String>,
+    /// Ask for `offline_access` when the authorization server offers it.
+    /// Off by default: providers list it even when the client may not use it
+    /// (Keycloak then fails the code exchange with `not_allowed`).
+    pub request_offline_access: bool,
 }
 
 impl Default for OidcConfig {
@@ -78,6 +82,7 @@ impl Default for OidcConfig {
             timeouts: Timeouts::default(),
             allow_insecure_http: false,
             expected_issuer: None,
+            request_offline_access: false,
         }
     }
 }
@@ -180,6 +185,8 @@ pub struct AuthManager {
     as_scopes: Option<Vec<String>>,
     /// `scopes_supported` of the protected resource (RFC 9728).
     resource_scopes: Option<Vec<String>>,
+    /// See [`OidcConfig::request_offline_access`].
+    request_offline_access: bool,
 }
 
 /// Query parameters of the authorization response (RFC 6749 §4.1.2, RFC 9207).
@@ -368,6 +375,7 @@ impl AuthManager {
             as_nonce: Arc::default(),
             as_scopes,
             resource_scopes,
+            request_offline_access: oidc_config.request_offline_access,
         })
     }
 
@@ -404,7 +412,7 @@ impl AuthManager {
 
         // 3. Setup Loopback Server to catch the callback
         let expected_state = state_val.clone();
-        let (server_handle, rx) = self.setup_loopback_server(expected_state).await?;
+        let (server, rx) = self.setup_loopback_server(expected_state).await?;
 
         // 4. Pushed Authorization Request (PAR)
         let previous = self
@@ -413,25 +421,26 @@ impl AuthManager {
             .unwrap_or_default();
         let scopes = self.select_scopes(scopes, &previous);
         let dpop_jkt = dpop_key.jkt()?;
-        let par_data = self
-            .perform_par_request(
-                &pkce_challenge,
-                &state_val,
-                &scopes,
-                &dpop_jkt,
-                &server_handle,
-            )
-            .await?;
+        let par_data = match self
+            .perform_par_request(&pkce_challenge, &state_val, &scopes, &dpop_jkt)
+            .await
+        {
+            Ok(data) => data,
+            Err(e) => {
+                server.stop().await;
+                return Err(e);
+            }
+        };
 
         // 5. Direct user to Auth URL
         if let Err(e) = self.open_auth_url(&par_data, url_tx).await {
-            server_handle.abort();
+            server.stop().await;
             return Err(e);
         }
 
         // 6. Wait for code from callback
         let callback = tokio::time::timeout(self.timeouts.auth, rx).await;
-        server_handle.abort();
+        server.stop().await;
         let code = match callback {
             Ok(Ok(Ok(code))) => code,
             Ok(Ok(Err(reason))) => anyhow::bail!("Authorization failed: {}", reason),
@@ -449,16 +458,24 @@ impl AuthManager {
     async fn setup_loopback_server(
         &self,
         expected_state: String,
-    ) -> Result<(
-        tokio::task::JoinHandle<()>,
-        oneshot::Receiver<CallbackResult>,
-    )> {
+    ) -> Result<(LoopbackServer, oneshot::Receiver<CallbackResult>)> {
         let redirect = net::require_loopback_redirect(&self.redirect_url)?;
         let (tx, rx) = oneshot::channel::<CallbackResult>();
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
         let app = Router::new()
             .route("/callback", get(handle_callback))
+            // The browser must not keep a connection to this short-lived server:
+            // a later login would otherwise reach the previous, stale handler.
+            .layer(axum::middleware::map_response(
+                |mut response: axum::response::Response| async move {
+                    response.headers_mut().insert(
+                        axum::http::header::CONNECTION,
+                        axum::http::HeaderValue::from_static("close"),
+                    );
+                    response
+                },
+            ))
             .with_state(AuthServerState {
                 expected_state,
                 tx,
@@ -509,13 +526,23 @@ impl AuthManager {
             }
         }
 
-        let server_handle = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let serve = axum::serve(listener, app).with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            });
+            if let Err(e) = serve.await {
                 error!("Loopback server error: {:?}", e);
             }
         });
 
-        Ok((server_handle, rx))
+        Ok((
+            LoopbackServer {
+                handle,
+                shutdown: Some(shutdown_tx),
+            },
+            rx,
+        ))
     }
 
     async fn perform_par_request(
@@ -524,7 +551,6 @@ impl AuthManager {
         state_val: &str,
         scopes: &[String],
         dpop_jkt: &str,
-        server_handle: &tokio::task::JoinHandle<()>,
     ) -> Result<ParResponse> {
         info!("Step 1: Pushed Authorization Request (PAR)...");
         let mut par_params = vec![
@@ -554,7 +580,6 @@ impl AuthManager {
         if !par_res.status().is_success() {
             let error_text = par_res.text().await?;
             error!("PAR request failed: {}", error_text);
-            server_handle.abort();
             anyhow::bail!("PAR request failed: {}", error_text);
         }
 
@@ -830,7 +855,8 @@ impl AuthManager {
     /// Scopes for a new authorization request (MCP scope selection strategy):
     /// the challenged scopes, else the resource's `scopes_supported`, plus the
     /// previously requested ones (step-up keeps earlier permissions). `openid`
-    /// and `offline_access` are added when the authorization server offers them.
+    /// is added when the authorization server offers it, `offline_access` too
+    /// when enabled.
     fn select_scopes(&self, challenged: Option<Vec<String>>, previous: &[String]) -> Vec<String> {
         let mut scopes: Vec<String> = previous.to_vec();
         let wanted = challenged
@@ -846,7 +872,7 @@ impl AuthManager {
         if self.as_scopes.is_none() || offered("openid") {
             extra.push("openid".to_string());
         }
-        if offered("offline_access") {
+        if self.request_offline_access && offered("offline_access") {
             extra.push("offline_access".to_string());
         }
         for s in wanted.into_iter().chain(extra) {
@@ -860,6 +886,33 @@ impl AuthManager {
     /// Retrieves the current access token for a user from the vault.
     pub fn get_token(&self, user_id: &str) -> Result<Option<String>> {
         self.vault.get_token(user_id)
+    }
+}
+
+/// The loopback server receiving the authorization response.
+struct LoopbackServer {
+    handle: tokio::task::JoinHandle<()>,
+    shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl LoopbackServer {
+    /// Stops accepting, closes idle connections and frees the port.
+    async fn stop(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if tokio::time::timeout(Duration::from_secs(2), &mut self.handle)
+            .await
+            .is_err()
+        {
+            self.handle.abort();
+        }
+    }
+}
+
+impl Drop for LoopbackServer {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
@@ -1100,6 +1153,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
 
         let (tx, _rx) = oneshot::channel::<SocketAddr>();
@@ -1396,6 +1450,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_loopback_servers_on_the_same_port_dont_share_connections() -> Result<()> {
+        // A browser keeps connections alive; the second login's callback must
+        // reach the second server, not the previous one.
+        let port = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await?
+            .local_addr()?
+            .port();
+        let am = AuthManager {
+            client_id: "c".into(),
+            auth_url: "http://localhost/auth".into(),
+            token_url: "http://localhost/token".into(),
+            par_url: "http://localhost/par".into(),
+            redirect_url: format!("http://127.0.0.1:{port}/callback"),
+            resource: "res".into(),
+            http_client: reqwest::Client::new(),
+            vault: Vault::in_memory("svc"),
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            issuer_name: "Mock Issuer".into(),
+            resource_name: "Mock Resource".into(),
+            success_html: Arc::new("OK".into()),
+            failure_html: Arc::new("FAIL".into()),
+            timeouts: Timeouts::fast(),
+            issuer: None,
+            iss_required: false,
+            as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
+            request_offline_access: false,
+        };
+        let browser = reqwest::Client::new(); // pools connections like a browser
+        let callback = |state: &str| {
+            format!("http://127.0.0.1:{port}/callback?state={state}&code=code-{state}")
+        };
+
+        for state in ["first", "second"] {
+            let (server, rx) = am.setup_loopback_server(state.to_string()).await?;
+            let resp = browser.get(callback(state)).send().await?;
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::OK,
+                "callback for {state}"
+            );
+            assert_eq!(resp.headers()["connection"], "close");
+            assert_eq!(rx.await?, Ok(format!("code-{state}")));
+            server.stop().await;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_reauthenticate_rejects_non_loopback_redirect() {
         let am = AuthManager {
             client_id: "c".into(),
@@ -1418,6 +1523,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
         let err = am.reauthenticate("user", None, None).await.unwrap_err();
         assert!(err.to_string().contains("RFC 8252"), "{err}");
@@ -1450,6 +1556,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
         assert!(am.reauthenticate("user", None, None).await.is_err());
         assert_eq!(vault.get_dpop_key("user").unwrap(), Some(vec![7u8; 32]));
@@ -1517,6 +1624,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
 
         let (tx, _rx) = oneshot::channel::<String>();
@@ -1549,6 +1657,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
         am.vault.store_token("user", "token")?;
 
@@ -1718,7 +1827,10 @@ mod tests {
             as_metadata(
                 serde_json::json!({"scopes_supported": ["openid", "offline_access", "mcp:read"]}),
             ),
-            OidcConfig::default(),
+            OidcConfig {
+                request_offline_access: true,
+                ..Default::default()
+            },
         )
         .await?;
         let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
@@ -1742,6 +1854,10 @@ mod tests {
         // An AS that lists scopes without openid doesn't get it.
         am.as_scopes = Some(v(&["mcp:read"]));
         assert_eq!(am.select_scopes(None, &[]), v(&["mcp:read"]));
+        // offline_access is only requested when enabled.
+        am.as_scopes = Some(v(&["openid", "offline_access"]));
+        am.request_offline_access = false;
+        assert_eq!(am.select_scopes(None, &[]), v(&["mcp:read", "openid"]));
         // An AS that lists no scopes keeps the historical openid.
         am.as_scopes = None;
         am.resource_scopes = None;
@@ -1830,6 +1946,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
         let key = crate::crypto::DpopKey::generate();
         let res = am
@@ -1865,6 +1982,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
 
         // This should fail after 5 retries because the port is occupied by 'listener'
@@ -1909,6 +2027,7 @@ mod tests {
             as_nonce: Arc::default(),
             as_scopes: None,
             resource_scopes: None,
+            request_offline_access: false,
         };
 
         // Mock PAR response

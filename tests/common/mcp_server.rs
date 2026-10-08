@@ -71,6 +71,7 @@ pub struct Log {
 pub struct McpServer {
     pub base: String,
     pub log: Arc<Mutex<Log>>,
+    reject_left: Arc<AtomicUsize>,
 }
 
 impl McpServer {
@@ -108,6 +109,11 @@ impl McpServer {
     pub fn rejections(&self) -> Vec<String> {
         self.log.lock().unwrap().rejections.clone()
     }
+
+    /// Rejects the next `n` otherwise valid requests with 401 `invalid_token`.
+    pub fn reject_next(&self, n: usize) {
+        self.reject_left.store(n, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -123,9 +129,10 @@ pub async fn start(options: ServerOptions) -> McpServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let log: Arc<Mutex<Log>> = Arc::default();
+    let reject_left = Arc::new(AtomicUsize::new(options.reject_valid_tokens));
     let state = AppState {
         base: base.clone(),
-        reject_left: Arc::new(AtomicUsize::new(options.reject_valid_tokens)),
+        reject_left: reject_left.clone(),
         options,
         log: log.clone(),
         http: reqwest::Client::new(),
@@ -149,7 +156,11 @@ pub async fn start(options: ServerOptions) -> McpServer {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    McpServer { base, log }
+    McpServer {
+        base,
+        log,
+        reject_left,
+    }
 }
 
 async fn resource_metadata(State(s): State<AppState>) -> Response {
@@ -248,7 +259,10 @@ async fn check_auth(s: &AppState, headers: &HeaderMap, htm: &str) -> Result<Vec<
         Err(e) => return Err(reject(format!("introspection failed: {e}"), None)),
     };
     if introspected["active"] != true {
-        return Err(reject("token not active".into(), Some("invalid_token")));
+        return Err(reject(
+            format!("token not active: {introspected}"),
+            Some("invalid_token"),
+        ));
     }
     let jkt = introspected["cnf"]["jkt"].as_str().unwrap_or_default();
     if let Err(why) = verify_dpop_proof(proof, htm, &format!("{}/mcp", s.base), token, jkt) {

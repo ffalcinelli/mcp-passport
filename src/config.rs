@@ -85,6 +85,14 @@ pub struct Config {
     )]
     pub oidc_issuer: Option<String>,
 
+    /// Request the offline_access scope (long-lived refresh tokens) when the provider offers it
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_OFFLINE_ACCESS",
+        help_heading = "OIDC Configuration"
+    )]
+    pub oidc_offline_access: bool,
+
     /// OIDC Client ID (a pre-registered ID, or an https URL of a Client ID Metadata Document)
     #[arg(
         long,

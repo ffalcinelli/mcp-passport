@@ -40,8 +40,12 @@ pub async fn start_keycloak() -> anyhow::Result<Keycloak> {
     let realm_path = std::env::current_dir()?.join("keycloak-realm.json");
     let realm_path = realm_path.to_str().expect("utf-8 path").to_string();
 
+    // e.g. MCP_PASSPORT_TEST_KC_LOG_LEVEL="INFO,org.keycloak.protocol.oidc:DEBUG"
+    let log_level =
+        std::env::var("MCP_PASSPORT_TEST_KC_LOG_LEVEL").unwrap_or_else(|_| "INFO".into());
     let container = GenericImage::new(KEYCLOAK_IMAGE.0, KEYCLOAK_IMAGE.1)
         .with_wait_for(WaitFor::message_on_stdout("Listening on:"))
+        .with_env_var("KC_LOG_LEVEL", log_level)
         .with_env_var("KC_BOOTSTRAP_ADMIN_USERNAME", "admin")
         .with_env_var("KC_BOOTSTRAP_ADMIN_PASSWORD", "admin")
         .with_mount(Mount::bind_mount(
@@ -58,6 +62,81 @@ pub async fn start_keycloak() -> anyhow::Result<Keycloak> {
         container,
         base: format!("http://127.0.0.1:{port}"),
     })
+}
+
+/// A token for Keycloak's admin REST API (bootstrap admin of `start_keycloak`).
+pub async fn keycloak_admin_token(kc: &Keycloak) -> anyhow::Result<String> {
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(format!(
+            "{}/realms/master/protocol/openid-connect/token",
+            kc.base
+        ))
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "admin-cli"),
+            ("username", "admin"),
+            ("password", "admin"),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    resp["access_token"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no admin token: {resp}"))
+}
+
+/// Creates realm client scopes and makes them optional scopes of `client_id`.
+pub async fn add_optional_scopes(
+    kc: &Keycloak,
+    client_id: &str,
+    scopes: &[&str],
+) -> anyhow::Result<()> {
+    let http = reqwest::Client::new();
+    let token = keycloak_admin_token(kc).await?;
+    let admin = format!("{}/admin/realms/mcp", kc.base);
+    let clients: serde_json::Value = http
+        .get(format!("{admin}/clients"))
+        .query(&[("clientId", client_id)])
+        .bearer_auth(&token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let cid = clients[0]["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("client {client_id} not found"))?
+        .to_string();
+    for scope in scopes {
+        let created = http
+            .post(format!("{admin}/client-scopes"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "name": scope,
+                "protocol": "openid-connect",
+                "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"}
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let location = created
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| anyhow::anyhow!("no Location for scope {scope}"))?;
+        let sid = location.rsplit('/').next().unwrap_or_default().to_string();
+        http.put(format!(
+            "{admin}/clients/{cid}/optional-client-scopes/{sid}"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await?
+        .error_for_status()?;
+    }
+    Ok(())
 }
 
 pub async fn start_chrome() -> anyhow::Result<ContainerAsync<GenericImage>> {
