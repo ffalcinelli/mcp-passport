@@ -10,6 +10,7 @@
 //! It also includes a local loopback server to handle the OAuth2 callback.
 
 use crate::crypto::DpopKey;
+use crate::discovery;
 use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
@@ -161,21 +162,6 @@ pub struct AuthManager {
     timeouts: Timeouts,
 }
 
-#[derive(Deserialize, Debug)]
-struct DiscoveryDocument {
-    issuer: String,
-    authorization_endpoint: String,
-    token_endpoint: String,
-    pushed_authorization_request_endpoint: Option<String>,
-    #[serde(rename = "organization_name")]
-    organization_name: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-struct ResourceMetadata {
-    resource_name: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct AuthCallback {
     code: String,
@@ -188,12 +174,15 @@ struct ParResponse {
 }
 
 impl AuthManager {
-    /// Discovers OIDC endpoints via the discovery document or overrides.
+    /// Resolves the authorization server endpoints for `resource`.
+    ///
+    /// `resource_metadata_url` is the (already validated) RFC 9728 metadata URL
+    /// taken from a `WWW-Authenticate` challenge, if any.
     pub async fn discover(
         mut oidc_config: OidcConfig,
         resource: String,
         vault: Vault,
-        metadata_url_override: Option<&str>,
+        resource_metadata_url: Option<&str>,
     ) -> Result<Self> {
         let http_client = HttpClient::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -201,68 +190,56 @@ impl AuthManager {
             .build()
             .context("Failed to build HTTP client")?;
 
-        let discovery_url = metadata_url_override.or(oidc_config.discovery_url.as_deref());
+        let overrides_complete = oidc_config.auth_url_override.is_some()
+            && oidc_config.token_url_override.is_some()
+            && oidc_config.par_url_override.is_some();
 
-        let (auth_url, token_url, par_url, issuer_name) = if let Some(url) = discovery_url {
-            info!("Fetching OIDC discovery from {}...", url);
-            let resp = http_client.get(url).send().await?;
-            if !resp.status().is_success() {
-                anyhow::bail!(
-                    "Failed to fetch discovery document from {}: {}",
-                    url,
-                    resp.status()
-                );
-            }
-            let doc: DiscoveryDocument = resp.json().await?;
-
-            let auth = oidc_config
-                .auth_url_override
-                .take()
-                .unwrap_or(doc.authorization_endpoint);
-            let token = oidc_config
-                .token_url_override
-                .take()
-                .unwrap_or(doc.token_endpoint);
-            let par = oidc_config.par_url_override.take().or(doc.pushed_authorization_request_endpoint)
-                .context("Discovery document missing pushed_authorization_request_endpoint and no override provided")?;
-
-            let name = doc.organization_name.unwrap_or(doc.issuer);
-            (auth, token, par, name)
+        // Precedence: explicit endpoint overrides, then an explicitly configured
+        // discovery URL, then dynamic discovery from the resource (RFC 9728).
+        let (metadata, mut resource_name) = if overrides_complete {
+            (None, None)
+        } else if let Some(url) = oidc_config.discovery_url.as_deref() {
+            info!("Using configured OIDC discovery URL {}", url);
+            let metadata = discovery::fetch_configured_metadata(&http_client, url).await?;
+            (Some(metadata), None)
         } else {
-            let auth = oidc_config
-                .auth_url_override
-                .take()
-                .context("auth_url is required when discovery_url is missing")?;
-            let token = oidc_config
-                .token_url_override
-                .take()
-                .context("token_url is required when discovery_url is missing")?;
-            let par = oidc_config
-                .par_url_override
-                .take()
-                .context("par_url is required when discovery_url is missing")?;
-            (auth, token, par, "Custom Provider".to_string())
+            info!("Discovering the authorization server for {}...", resource);
+            let found =
+                discovery::discover_from_resource(&http_client, &resource, resource_metadata_url)
+                    .await?;
+            (Some(found.metadata), found.resource_name)
         };
 
-        // Fetch Protected Resource Metadata (RFC 9728)
-        let fetched_resource_name: Option<String> = async {
-            let mut res_url = url::Url::parse(&resource).ok()?;
-            res_url.set_path("/.well-known/oauth-protected-resource");
-            res_url.set_query(None);
-            res_url.set_fragment(None);
+        let auth_url = oidc_config
+            .auth_url_override
+            .take()
+            .or_else(|| metadata.as_ref().map(|m| m.authorization_endpoint.clone()))
+            .context("No authorization endpoint (set --kc-auth-url or a discovery URL)")?;
+        let token_url = oidc_config
+            .token_url_override
+            .take()
+            .or_else(|| metadata.as_ref().map(|m| m.token_endpoint.clone()))
+            .context("No token endpoint (set --kc-token-url or a discovery URL)")?;
+        let par_url = oidc_config
+            .par_url_override
+            .take()
+            .or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|m| m.pushed_authorization_request_endpoint.clone())
+            })
+            .context(
+                "Authorization server metadata has no pushed_authorization_request_endpoint \
+                 and no --kc-par-url override was provided",
+            )?;
+        let issuer_name = metadata
+            .map(|m| m.organization_name.unwrap_or(m.issuer))
+            .unwrap_or_else(|| "Custom Provider".to_string());
 
-            info!("Fetching Protected Resource Metadata from {}...", res_url);
-            let resp = http_client.get(res_url.as_str()).send().await.ok()?;
-            if resp.status().is_success() {
-                let meta = resp.json::<ResourceMetadata>().await.ok()?;
-                meta.resource_name
-            } else {
-                None
-            }
+        if resource_name.is_none() {
+            resource_name = discovery::fetch_resource_name(&http_client, &resource).await;
         }
-        .await;
-
-        let resource_name = fetched_resource_name.unwrap_or_else(|| resource.clone());
+        let resource_name = resource_name.unwrap_or_else(|| resource.clone());
 
         let (success_html, failure_html) = if let Some(dir) = &oidc_config.template_dir {
             let (success_res, failure_res) = tokio::join!(
@@ -936,6 +913,67 @@ mod tests {
         let res =
             AuthManager::discover(config, "res".to_string(), Vault::in_memory("svc"), None).await;
         assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_discover_prefers_configured_discovery_url() -> Result<()> {
+        let app = Router::new().route(
+            "/oidc",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "issuer": "http://configured.example.com",
+                    "authorization_endpoint": "http://configured.example.com/auth",
+                    "token_endpoint": "http://configured.example.com/token",
+                    "pushed_authorization_request_endpoint": "http://configured.example.com/par"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let config = OidcConfig {
+            discovery_url: Some(format!("{base}/oidc")),
+            client_id: "c".into(),
+            redirect_url: "http://127.0.0.1:1/callback".into(),
+            ..Default::default()
+        };
+        // The challenge's resource_metadata (a 404 here) must not override the
+        // explicitly configured discovery URL.
+        let am = AuthManager::discover(
+            config,
+            format!("{base}/rpc"),
+            Vault::in_memory("svc"),
+            Some(&format!("{base}/missing")),
+        )
+        .await?;
+        assert_eq!(am.token_url, "http://configured.example.com/token");
+        assert_eq!(am.par_url, "http://configured.example.com/par");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_discover_overrides_skip_network() -> Result<()> {
+        let config = OidcConfig {
+            client_id: "c".into(),
+            redirect_url: "http://127.0.0.1:1/callback".into(),
+            auth_url_override: Some("http://as/auth".into()),
+            token_url_override: Some("http://as/token".into()),
+            par_url_override: Some("http://as/par".into()),
+            ..Default::default()
+        };
+        let am = AuthManager::discover(
+            config,
+            "http://127.0.0.1:1/rpc".into(),
+            Vault::in_memory("svc"),
+            None,
+        )
+        .await?;
+        assert_eq!(am.issuer_name, "Custom Provider");
+        assert_eq!(am.resource_name, "http://127.0.0.1:1/rpc");
+        Ok(())
     }
 
     #[tokio::test]

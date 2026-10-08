@@ -1,6 +1,8 @@
 pub mod auth;
+mod challenge;
 pub mod config;
 pub mod crypto;
+mod discovery;
 pub mod proxy;
 pub mod templates;
 pub mod vault;

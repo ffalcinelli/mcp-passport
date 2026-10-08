@@ -5,13 +5,14 @@
 //! for transparently handling authentication challenges without interrupting the client connection.
 
 use crate::auth::{AuthManager, OidcConfig};
+use crate::challenge::WwwAuthenticate;
 use crate::config::AuthScheme;
 use crate::crypto::DpopKey;
 use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
 use rand::Rng;
-use reqwest::{header::HeaderMap, Client, StatusCode};
+use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
@@ -48,69 +49,6 @@ pub struct Proxy {
     last_reauth: Mutex<Option<std::time::Instant>>,
     /// Counter for re-authentication attempts.
     reauth_count: Arc<std::sync::atomic::AtomicU64>,
-}
-
-#[derive(Debug, Default)]
-struct WwwAuthenticate<'a> {
-    resource_metadata: Option<&'a str>,
-    scope: Option<Vec<&'a str>>,
-    error: Option<&'a str>,
-}
-
-impl<'a> WwwAuthenticate<'a> {
-    fn parse(headers: &'a HeaderMap) -> Self {
-        let mut result = Self::default();
-        if let Some(auth_val) = headers
-            .get(reqwest::header::WWW_AUTHENTICATE)
-            .and_then(|h| h.to_str().ok())
-        {
-            debug!("Parsing WWW-Authenticate: {}", auth_val);
-
-            // Basic parsing for resource_metadata and scope
-            if let Some(rm) = extract_param(auth_val, "resource_metadata") {
-                result.resource_metadata = Some(rm);
-            }
-            if let Some(sc) = extract_param(auth_val, "scope") {
-                result.scope = Some(sc.split_whitespace().collect());
-            }
-            if let Some(err) = extract_param(auth_val, "error") {
-                result.error = Some(err);
-            }
-        }
-        result
-    }
-}
-
-fn extract_param<'a>(header: &'a str, param: &str) -> Option<&'a str> {
-    if param.is_empty() {
-        return None;
-    }
-    let mut start = 0;
-    while let Some(pos) = header[start..].find(param) {
-        let absolute_pos = start + pos;
-        let after_param = &header[absolute_pos + param.len()..];
-        if let Some(remainder) = after_param.strip_prefix('=') {
-            if let Some(stripped) = remainder.strip_prefix('"') {
-                if let Some(end) = stripped.find('"') {
-                    return Some(&stripped[..end]);
-                }
-            } else {
-                // Unquoted: take until comma or end of string
-                let end = remainder.find(',').unwrap_or(remainder.len());
-                return Some(remainder[..end].trim());
-            }
-        }
-        start = absolute_pos + param.len();
-    }
-    None
-}
-
-fn derive_resource_url(remote_url: &str) -> Result<String> {
-    let u = Url::parse(remote_url).context("Failed to parse remote URL")?;
-    let joined = u
-        .join("/.well-known/oauth-protected-resource")
-        .context("Failed to join URL with well-known path")?;
-    Ok(joined.to_string())
 }
 
 fn validate_resource_metadata(metadata_url: Option<&str>, remote_url: &str) -> Option<String> {
@@ -206,11 +144,9 @@ impl Proxy {
             return Ok(am.clone());
         }
 
-        let discovery_url = metadata_url.or(self.oidc_config.discovery_url.as_deref());
-
         info!(
-            "Performing dynamic discovery for AuthManager (url: {:?})...",
-            discovery_url
+            "Initializing AuthManager (resource_metadata: {:?})...",
+            metadata_url
         );
 
         let am = AuthManager::discover(
@@ -295,16 +231,10 @@ impl Proxy {
             warn!("401 Unauthorized received. Activating Airlock suspension...");
             let challenge = WwwAuthenticate::parse(response.headers());
 
-            let metadata_url = validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
-                .or_else(|| {
-                    // Fallback to well-known at root if header is missing or SSRF check failed
-                    info!("WWW-Authenticate missing or invalid resource_metadata, falling back to root well-known...");
-                    derive_resource_url(&self.remote_url).ok()
-                });
-
-            let scopes = challenge
-                .scope
-                .map(|v| v.into_iter().map(|s| s.to_string()).collect());
+            // Without a (valid) resource_metadata, discovery falls back to the well-known URIs.
+            let metadata_url =
+                validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
+            let scopes = challenge.scope();
             self.trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
                 .await?;
 
@@ -313,16 +243,12 @@ impl Proxy {
 
         if response.status() == StatusCode::FORBIDDEN {
             let challenge = WwwAuthenticate::parse(response.headers());
-            if challenge.error == Some("insufficient_scope") {
+            if challenge.error() == Some("insufficient_scope") {
                 warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
 
                 let metadata_url =
-                    validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
-                        .or_else(|| derive_resource_url(&self.remote_url).ok());
-
-                let scopes = challenge
-                    .scope
-                    .map(|v| v.into_iter().map(|s| s.to_string()).collect());
+                    validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
+                let scopes = challenge.scope();
                 self.trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
                     .await?;
                 return Ok(true);
@@ -567,12 +493,8 @@ impl Proxy {
 
         let challenge = WwwAuthenticate::parse(resp.headers());
         let metadata_url =
-            validate_resource_metadata(challenge.resource_metadata, &self.remote_url)
-                .or_else(|| derive_resource_url(&self.remote_url).ok());
-
-        let scopes = challenge
-            .scope
-            .map(|v| v.into_iter().map(|s| s.to_string()).collect());
+            validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
+        let scopes = challenge.scope();
         if let Err(e) = self
             .trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
             .await
@@ -688,64 +610,6 @@ impl Proxy {
 mod tests {
     use super::*;
     use axum::{routing::post, Router};
-    use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
-
-    #[test]
-    fn test_derive_resource_url() {
-        // Test basic URL joining without trailing slash
-        assert_eq!(
-            derive_resource_url("http://example.com/api").unwrap(),
-            "http://example.com/.well-known/oauth-protected-resource"
-        );
-
-        // Test basic URL joining with trailing slash
-        assert_eq!(
-            derive_resource_url("http://example.com/api/").unwrap(),
-            "http://example.com/.well-known/oauth-protected-resource"
-        );
-
-        // Test root URL
-        assert_eq!(
-            derive_resource_url("http://example.com").unwrap(),
-            "http://example.com/.well-known/oauth-protected-resource"
-        );
-
-        // Test with invalid URL
-        assert!(derive_resource_url("not a url").is_err());
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_empty_headers() {
-        let headers = HeaderMap::new();
-        let auth = WwwAuthenticate::parse(&headers);
-        assert_eq!(auth.resource_metadata, None);
-        assert_eq!(auth.scope, None);
-        assert_eq!(auth.error, None);
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_invalid_utf8() {
-        let mut headers = HeaderMap::new();
-        let header_value = HeaderValue::from_bytes(b"Bearer \xFF\xFF").unwrap();
-        headers.insert(WWW_AUTHENTICATE, header_value);
-
-        let auth = WwwAuthenticate::parse(&headers);
-        assert_eq!(auth.resource_metadata, None);
-        assert_eq!(auth.scope, None);
-        assert_eq!(auth.error, None);
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_missing_parameters() {
-        let mut headers = HeaderMap::new();
-        let header_value = HeaderValue::from_str("Bearer some_other_param=\"value\"").unwrap();
-        headers.insert(WWW_AUTHENTICATE, header_value);
-
-        let auth = WwwAuthenticate::parse(&headers);
-        assert_eq!(auth.resource_metadata, None);
-        assert_eq!(auth.scope, None);
-        assert_eq!(auth.error, None);
-    }
 
     #[test]
     fn test_proxy_new() {
@@ -776,153 +640,6 @@ mod tests {
         assert_eq!(proxy.oidc_config.client_id, oidc_config.client_id);
         assert_eq!(proxy.protocol_version, protocol_version);
         assert_eq!(proxy.auth_scheme, auth_scheme);
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_quoted() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static(
-                "DPoP resource_metadata=\"http://example.com/.well-known/oauth-protected-resource\", scope=\"mcp:all\"",
-            ),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(
-            challenge.resource_metadata,
-            Some("http://example.com/.well-known/oauth-protected-resource")
-        );
-        assert_eq!(challenge.scope, Some(vec!["mcp:all"]));
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_unquoted() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static(
-                "DPoP resource_metadata=http://example.com/.well-known/oauth-protected-resource, scope=mcp:all",
-            ),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(
-            challenge.resource_metadata,
-            Some("http://example.com/.well-known/oauth-protected-resource")
-        );
-        assert_eq!(challenge.scope, Some(vec!["mcp:all"]));
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_full() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static(
-                "Bearer error=\"insufficient_scope\", scope=\"admin\", resource_metadata=\"http://localhost/discovery\"",
-            ),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.error, Some("insufficient_scope"));
-        assert_eq!(challenge.scope, Some(vec!["admin"]));
-        assert_eq!(
-            challenge.resource_metadata,
-            Some("http://localhost/discovery")
-        );
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_multiple_scopes() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer scope=\"read write admin\""),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.scope, Some(vec!["read", "write", "admin"]));
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_unquoted_error() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer error=invalid_token, scope=mcp:all"),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.error, Some("invalid_token"));
-        assert_eq!(challenge.scope, Some(vec!["mcp:all"]));
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_unclosed_quote() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer scope=\"mcp:all"),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.scope, None);
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_empty_value() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer scope=\"\""),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.scope, Some(vec![]));
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_extra_spacing() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer scope=\"read   write\""),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.scope, Some(vec!["read", "write"]));
-    }
-
-    #[test]
-    fn test_www_authenticate_parse_substring_match() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            WWW_AUTHENTICATE,
-            HeaderValue::from_static("Bearer myscope=\"admin\""),
-        );
-        let challenge = WwwAuthenticate::parse(&headers);
-        assert_eq!(challenge.scope, Some(vec!["admin"]));
-    }
-
-    #[test]
-    fn test_extract_param_empty_param() {
-        assert_eq!(extract_param("Bearer scope=\"admin\"", ""), None);
-    }
-
-    #[test]
-    fn test_extract_param_not_found() {
-        assert_eq!(extract_param("Bearer scope=all", "error"), None);
-    }
-
-    #[test]
-    fn test_url_joining_behavior() -> Result<()> {
-        let remote_url = "http://localhost:8081/rpc";
-        let joined = derive_resource_url(remote_url)?;
-        assert_eq!(
-            joined,
-            "http://localhost:8081/.well-known/oauth-protected-resource"
-        );
-
-        let remote_url_no_path = "http://localhost:8081";
-        let joined = derive_resource_url(remote_url_no_path)?;
-        assert_eq!(
-            joined,
-            "http://localhost:8081/.well-known/oauth-protected-resource"
-        );
-        Ok(())
     }
 
     #[test]
@@ -959,25 +676,6 @@ mod tests {
         let different_port =
             validate_resource_metadata(Some("http://localhost:8082/discovery"), remote_url);
         assert_eq!(different_port, None);
-    }
-
-    #[test]
-    fn test_extract_param_quoted_with_comma() {
-        let val = "Bearer scope=\"a,b,c\", error=\"err\"";
-        assert_eq!(extract_param(val, "scope"), Some("a,b,c"));
-        assert_eq!(extract_param(val, "error"), Some("err"));
-    }
-
-    #[test]
-    fn test_extract_param_unquoted_with_comma() {
-        let val = "Bearer scope=a,b,c, error=err";
-        assert_eq!(extract_param(val, "scope"), Some("a")); // Stops at first comma
-    }
-
-    #[test]
-    fn test_extract_param_unquoted_at_end() {
-        let val = "Bearer foo=bar";
-        assert_eq!(extract_param(val, "foo"), Some("bar"));
     }
 
     #[tokio::test]
