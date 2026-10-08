@@ -12,6 +12,7 @@ pub mod vault;
 
 use crate::auth::{OidcConfig, Timeouts};
 use crate::config::Config;
+use crate::mcp::Era;
 use crate::proxy::Proxy;
 use crate::vault::Vault;
 use std::sync::Arc;
@@ -113,12 +114,13 @@ where
         .clone()
         .unwrap_or_else(|| config.remote_mcp_url.clone());
 
-    // Task 1: Persistent SSE Listener (Server -> Client). It starts after the
-    // first successful POST, so the session id (if any) is known.
+    // Task 1: Standalone GET stream (Server -> Client). It only exists for
+    // legacy servers, so it starts once a legacy session is established.
+    // Modern servers deliver change notifications on `subscriptions/listen`.
     let sse_proxy = proxy.clone();
     let sse_stdout_tx = stdout_tx.clone();
     let sse_handle = tokio::spawn(async move {
-        sse_proxy.wait_until_connected().await;
+        sse_proxy.wait_for_legacy_session().await;
         if let Err(e) = sse_proxy.listen_sse(&sse_url, sse_stdout_tx).await {
             error!("SSE listener failed: {:?}", e);
         }
@@ -127,6 +129,7 @@ where
     // Task 2: Stdio Read Loop (Client -> Server)
     let mut reader = BufReader::new(stdin).lines();
     let mut tasks = JoinSet::new();
+    let in_flight: InFlight = Arc::default();
 
     info!("Ready to proxy MCP stdio messages...");
 
@@ -135,11 +138,38 @@ where
             line_res = reader.next_line() => {
                 match line_res {
                     Ok(Some(line)) => {
+                        let parsed = serde_json::from_str::<serde_json::Value>(&line).ok();
+                        if let Some(target) = parsed.as_ref().and_then(cancelled_request_key) {
+                            if let Some((handle, era)) = in_flight.lock().await.remove(&target) {
+                                info!("Client cancelled request {}; stopping it.", target);
+                                // Dropping the HTTP response closes its stream, which is
+                                // how Streamable HTTP signals cancellation. Legacy servers
+                                // also expect the notification itself.
+                                handle.abort();
+                                if era == Era::Modern {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let key = parsed.as_ref().and_then(request_key);
+                        let era = parsed.as_ref().map(mcp::era_of).unwrap_or(Era::Legacy);
                         let proxy_task = proxy.clone();
                         let task_stdout_tx = stdout_tx.clone();
-                        tasks.spawn(async move {
+                        let task_in_flight = in_flight.clone();
+                        let task_key = key.clone();
+                        // Held across spawn so the task can't remove its entry
+                        // before it is inserted.
+                        let mut guard = in_flight.lock().await;
+                        let handle = tasks.spawn(async move {
                             process_message(proxy_task, line, task_stdout_tx).await;
+                            if let Some(k) = task_key {
+                                task_in_flight.lock().await.remove(&k);
+                            }
                         });
+                        if let Some(k) = key {
+                            guard.insert(k, (handle, era));
+                        }
                     }
                     Ok(None) => {
                         info!("Stdin closed, shutting down...");
@@ -157,22 +187,52 @@ where
             }
             Some(res) = tasks.join_next(), if !tasks.is_empty() => {
                 if let Err(e) = res {
-                    error!("Proxy task failed: {:?}", e);
+                    if !e.is_cancelled() {
+                        error!("Proxy task failed: {:?}", e);
+                    }
                 }
             }
         }
     }
 
-    // Cleanup: wait for remaining tasks and stop SSE listener
+    // Cleanup: give in-flight requests a moment to finish, then stop. Long-lived
+    // streams (e.g. `subscriptions/listen`) would otherwise keep us alive after
+    // the client closed stdin.
     info!("Waiting for remaining tasks to complete...");
     sse_handle.abort();
-    while tasks.join_next().await.is_some() {}
+    let drain = async { while tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout(SHUTDOWN_GRACE, drain).await.is_err() {
+        info!("Stopping requests still in flight.");
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
 
     // Drop stdout_tx so the writer task can finish
     drop(stdout_tx);
     let _ = stdout_handle.await;
 
     Ok(())
+}
+
+/// How long in-flight requests may run after stdin closes.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Requests being forwarded, by JSON-RPC id, so stdio cancellations can stop them.
+type InFlight =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, (tokio::task::AbortHandle, Era)>>>;
+
+/// The id of a request (a message with both `method` and `id`), as a map key.
+fn request_key(msg: &serde_json::Value) -> Option<String> {
+    msg.get("method")?;
+    msg.get("id").map(|id| id.to_string())
+}
+
+/// The target of a `notifications/cancelled`, as a map key.
+fn cancelled_request_key(msg: &serde_json::Value) -> Option<String> {
+    if msg.get("method")?.as_str()? != "notifications/cancelled" || msg.get("id").is_some() {
+        return None;
+    }
+    msg.pointer("/params/requestId").map(|id| id.to_string())
 }
 
 /// JSON-RPC 2.0 error codes used by the proxy.
@@ -222,6 +282,7 @@ async fn process_message(proxy: Arc<Proxy>, line: String, stdout_tx: mpsc::Sende
 mod tests {
     use super::*;
     use crate::config::AuthScheme;
+    use axum::response::IntoResponse;
     use axum::{routing::post, Router};
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -443,6 +504,149 @@ mod tests {
         let resp = rx.recv().await.expect("Expected a response");
         assert!(resp.contains("\"result\":\"ok\""));
         Ok(())
+    }
+
+    /// Sets the flag when dropped, i.e. when the server stops streaming.
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A server whose `tools/call` streams forever (until the client
+    /// disconnects) and which records every message POSTed to it.
+    async fn endless_stream_server() -> Result<(
+        String,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    )> {
+        use axum::response::sse::{Event, Sse};
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let posted: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let (c, p) = (closed.clone(), posted.clone());
+        let app = Router::new().route(
+            "/rpc",
+            post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let (c, p) = (c.clone(), p.clone());
+                async move {
+                    p.lock().unwrap().push(body.clone());
+                    if body["method"] != "tools/call" {
+                        return axum::http::StatusCode::ACCEPTED.into_response();
+                    }
+                    let guard = DropFlag(c);
+                    let stream = futures::stream::unfold(guard, |g| async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        let progress = json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                            "params": {"progressToken": "t", "progress": 1}});
+                        Some((
+                            Ok::<_, std::convert::Infallible>(
+                                Event::default().data(progress.to_string()),
+                            ),
+                            g,
+                        ))
+                    });
+                    Sse::new(stream).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}/rpc", listener.local_addr()?);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((url, closed, posted))
+    }
+
+    async fn run_cancellation(
+        call: serde_json::Value,
+    ) -> Result<(bool, Vec<serde_json::Value>, String)> {
+        let (url, closed, posted) = endless_stream_server().await?;
+        let config = <Config as clap::Parser>::try_parse_from([
+            "mcp-passport",
+            "--remote-mcp-url",
+            &url,
+            "--oidc-redirect-url",
+            "http://127.0.0.1:1/callback",
+        ])?;
+        let (mut client_out, server_out) = tokio::io::duplex(64 * 1024);
+        let (mut client_in, server_in) = tokio::io::duplex(64 * 1024);
+        let run = tokio::spawn(run_with_vault(
+            config,
+            vault_with_credentials()?,
+            server_in,
+            server_out,
+        ));
+
+        client_in.write_all(format!("{call}\n").as_bytes()).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": call["id"], "reason": "user"}});
+        client_in
+            .write_all(format!("{cancel}\n").as_bytes())
+            .await?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !closed.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let was_closed = closed.load(std::sync::atomic::Ordering::SeqCst);
+        drop(client_in);
+        tokio::time::timeout(std::time::Duration::from_secs(10), run).await???;
+
+        let mut out = String::new();
+        client_out.read_to_string(&mut out).await?;
+        let posted = posted.lock().unwrap().clone();
+        Ok((was_closed, posted, out))
+    }
+
+    #[tokio::test]
+    async fn test_modern_cancellation_closes_the_stream() -> Result<()> {
+        let call = json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "slow", "arguments": {},
+                "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                          "io.modelcontextprotocol/clientCapabilities": {}}}});
+        let (closed, posted, out) = run_cancellation(call).await?;
+        assert!(closed, "the server must see the response stream close");
+        // Streamable HTTP defines no cancellation notification: none is POSTed.
+        assert_eq!(posted.len(), 1);
+        // Progress may have been forwarded, but never a response for id 5.
+        for line in out.lines() {
+            let msg: serde_json::Value = serde_json::from_str(line)?;
+            assert!(msg.get("id").is_none(), "unexpected response: {line}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_legacy_cancellation_also_forwards_the_notification() -> Result<()> {
+        let call = json!({"jsonrpc": "2.0", "id": "c-1", "method": "tools/call",
+            "params": {"name": "slow", "arguments": {}}});
+        let (closed, posted, _out) = run_cancellation(call).await?;
+        assert!(closed);
+        assert_eq!(posted.len(), 2);
+        assert_eq!(posted[1]["method"], "notifications/cancelled");
+        assert_eq!(posted[1]["params"]["requestId"], "c-1");
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_and_cancel_keys() {
+        assert_eq!(
+            request_key(&json!({"id": 1, "method": "x"})),
+            Some("1".into())
+        );
+        assert_eq!(
+            request_key(&json!({"id": "a", "method": "x"})),
+            Some("\"a\"".into())
+        );
+        assert_eq!(request_key(&json!({"id": 1, "result": {}})), None);
+        assert_eq!(request_key(&json!({"method": "notify"})), None);
+        let cancel = json!({"method": "notifications/cancelled", "params": {"requestId": "a"}});
+        assert_eq!(cancelled_request_key(&cancel), Some("\"a\"".into()));
+        assert_eq!(cancelled_request_key(&json!({"method": "other"})), None);
     }
 
     #[tokio::test]

@@ -51,8 +51,9 @@ pub struct Proxy {
     reauth_state: Mutex<ReauthState>,
     /// Credential generation: bumped on every successful re-authentication.
     reauth_count: Arc<std::sync::atomic::AtomicU64>,
-    /// Set once a POST to the remote server has succeeded.
-    connected_tx: watch::Sender<bool>,
+    /// Set once a legacy session exists (an `initialize` result or a session
+    /// id); only legacy servers offer the standalone GET stream.
+    legacy_session_tx: watch::Sender<bool>,
     /// Latest DPoP nonce provided by the remote server (RFC 9449 §9).
     rs_nonce: std::sync::Mutex<Option<String>>,
     /// Version negotiated by a legacy `initialize` handshake.
@@ -170,7 +171,7 @@ impl Proxy {
             reauth_mutex: Mutex::new(()),
             reauth_state: Mutex::new(ReauthState::default()),
             reauth_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            connected_tx: watch::channel(false).0,
+            legacy_session_tx: watch::channel(false).0,
             rs_nonce: std::sync::Mutex::new(None),
             negotiated_version: std::sync::Mutex::new(None),
             tool_headers: std::sync::Mutex::default(),
@@ -287,6 +288,7 @@ impl Proxy {
                 if let Ok(mut slot) = self.negotiated_version.lock() {
                     *slot = Some(v.to_string());
                 }
+                let _ = self.legacy_session_tx.send(true);
             }
         }
         if mcp::method_of(request) == Some("tools/list") && message.get("id") == request.get("id") {
@@ -570,14 +572,23 @@ impl Proxy {
 
         let status = response.status();
 
-        // A 404 for a request carrying a session id means the session is gone;
-        // the client has to start a new one with `initialize`.
-        if status == StatusCode::NOT_FOUND {
-            let mut sid = self.session_id.lock().await;
-            if let Some(old) = sid.take() {
+        // A legacy request carrying a session id that gets a bare 404 means the
+        // session is gone; the client has to start a new one with `initialize`.
+        // (A modern 404 carries a JSON-RPC error, e.g. method not found.)
+        if status == StatusCode::NOT_FOUND && mcp::era_of(payload) == Era::Legacy {
+            let body = response.bytes().await?;
+            let jsonrpc_error = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .filter(|v| v.get("jsonrpc").is_some() && v.get("error").is_some());
+            if let Some(value) = jsonrpc_error {
+                let _ = out.send(value.to_string()).await;
+                return Ok(Outcome::Done);
+            }
+            if let Some(old) = self.session_id.lock().await.take() {
                 warn!("MCP session {} expired (HTTP 404).", old);
                 anyhow::bail!("MCP session expired; re-initialize the connection");
             }
+            anyhow::bail!("Remote MCP server returned HTTP 404");
         }
 
         if let Some(sid) = response
@@ -590,10 +601,7 @@ impl Proxy {
                 info!("New MCP Session ID captured: {}", sid);
                 *sid_lock = Some(sid.to_string());
             }
-        }
-
-        if status.is_success() {
-            let _ = self.connected_tx.send(true);
+            let _ = self.legacy_session_tx.send(true);
         }
 
         if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT {
@@ -717,10 +725,12 @@ impl Proxy {
     }
 
     /// Resolves once a POST to the remote server has succeeded (so the session
-    /// id, if any, is known).
-    pub async fn wait_until_connected(&self) {
-        let mut rx = self.connected_tx.subscribe();
-        let _ = rx.wait_for(|connected| *connected).await;
+    /// Resolves once a legacy (2025-11-25 or earlier) session is established.
+    /// Modern servers have no standalone GET stream, so for them this never
+    /// resolves.
+    pub async fn wait_for_legacy_session(&self) {
+        let mut rx = self.legacy_session_tx.subscribe();
+        let _ = rx.wait_for(|legacy| *legacy).await;
     }
 
     /// Runs a re-authentication, or reuses the outcome of one that happened

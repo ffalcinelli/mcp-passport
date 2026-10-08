@@ -245,24 +245,52 @@ async fn test_404_with_session_clears_session() {
 }
 
 #[tokio::test]
-async fn test_wait_until_connected_after_successful_post() {
-    let app = Router::new().route("/mcp", post(|| async { StatusCode::ACCEPTED }));
-    let base = serve(app).await;
-    let proxy = authed_proxy(&format!("{base}/mcp"));
+async fn test_legacy_session_signal() {
+    let (url, _seen) = header_recorder().await;
+    let proxy = authed_proxy(&url);
 
     let p = proxy.clone();
-    let waiter = tokio::spawn(async move { p.wait_until_connected().await });
+    let waiter = tokio::spawn(async move { p.wait_for_legacy_session().await });
+
+    // Modern traffic never establishes a legacy session (no GET stream).
+    proxy
+        .call(modern(1, "tools/list", json!({})))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiter.is_finished());
 
     proxy
-        .call(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .call(json!({"jsonrpc": "2.0", "id": 2, "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {}}}))
         .await
         .unwrap();
     timeout(Duration::from_secs(2), waiter)
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_modern_404_is_a_jsonrpc_error_not_session_expiry() {
+    let app = Router::new().route(
+        "/mcp",
+        post(|axum::Json(body): axum::Json<Value>| async move {
+            (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({"jsonrpc": "2.0", "id": body["id"],
+                "error": {"code": -32601, "message": "Method not found"}})),
+            )
+        }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let resp = proxy
+        .call(modern(1, "unknown/method", json!({})))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resp["error"]["code"], -32601);
 }
 
 #[tokio::test]
