@@ -1,11 +1,11 @@
-# Gemini Project Context: mcp-passport 🛡️
+# Agent context: mcp-passport
 
 ## Project Overview
 `mcp-passport` is a high-performance, secure Layer 7 proxy for the **Model Context Protocol (MCP)**. It acts as a dedicated bridge between an AI client (e.g., Claude Desktop, Gemini CLI) communicating via `stdio` and a remote MCP server over HTTPS.
 
 The project is built on five core architectural pillars:
 1. **Transparent L7 Bridge**: 1:1 multiplexing of JSON-RPC over `stdio` ↔ HTTP, including persistent SSE piping for server-originated notifications.
-2. **MCP Spec Compliance (2025-11-25)**: Full implementation of the MCP authorization specification, including dynamic discovery via `WWW-Authenticate` and RFC 8707 Resource Indicators.
+2. **MCP 2026-07-28, dual-era**: Modern (per-request `_meta`) and legacy (`initialize`, up to 2025-11-25) clients are both forwarded with the HTTP rules of their era. Implements the 2026-07-28 authorization specification: discovery, PKCE check, `iss`, scope selection and step-up, issuer binding, Client ID Metadata Documents.
 3. **The "Airlock" State Machine**: Non-destructive interception of 401 (expiration) and 403 (insufficient scope) challenges, suspending the request stream using `tokio::sync::watch` while triggering transparent OIDC flows.
 4. **FAPI 2.0 Security**: Financial-grade security implementing **Pushed Authorization Requests (PAR)**, **PKCE**, and **DPoP (Demonstrating Proof-of-Possession)** to cryptographically bind tokens to ephemeral keys.
 5. **OS-Native Vault**: Secure storage of sensitive tokens and DPoP keys using the system's native keychain (macOS Keychain, Windows Credential Manager, Linux keyutils backed by the Secret Service) via the `keyring` crate. All three native backends must stay enabled in `Cargo.toml`: without a backend feature keyring silently uses a non-persistent mock store.
@@ -22,6 +22,8 @@ The project is built on five core architectural pillars:
 
 ## Directory Structure & Key Files
 - `src/main.rs`: Entry point and logging setup.
+- `src/mcp.rs`: Protocol eras, `Mcp-*` headers, `x-mcp-header` validation.
+- `src/config.rs`: CLI flags and environment variables.
 - `src/lib.rs`: `run`/`run_with_vault`, config validation, stdio loop, JSON-RPC error responses.
 - `src/proxy.rs`: Request suspension (Airlock), Streamable HTTP handling, and SSE listener.
 - `src/auth.rs`: PAR flow, loopback callback (`state`/`iss`/`error` checks), DPoP token exchange and refresh.
@@ -45,7 +47,12 @@ The project is built on five core architectural pillars:
 - **Keycloak**: Docker suites pin Keycloak 26.8.0 and Selenium 4.49.0 in `tests/common/mod.rs`. `tests/keycloak_2026_e2e_test.rs` is the full end-to-end check.
 
 ## Key Commands
-- **Test All**: `cargo test`
-- **Compliance E2E**: `cargo test --test headless_compliance_test`
-- **Integration Only**: `cargo test --test integration_test`
-- **Coverage**: `cargo tarpaulin --out Xml --verbose` (Integrated with [Codecov](https://app.codecov.io/gh/ffalcinelli/mcp-passport))
+- **Everything fast**: `./run_tests.sh` (fmt, clippy, `cargo test`); `./run_tests.sh --docker` adds the end-to-end suites.
+- **Spec conformance**: `cargo test --test spec_2026_test`
+- **Keycloak E2E**: `cargo test --test keycloak_2026_e2e_test -- --ignored --nocapture`
+- **Coverage**: `cargo tarpaulin --out Xml --verbose` (integrated with [Codecov](https://app.codecov.io/gh/ffalcinelli/mcp-passport))
+- **MSRV**: Rust 1.88 (`rust-version` in `Cargo.toml`, checked in CI).
+
+## Docs
+- `README.md` (overview, configuration table, which must match `--help`), `GUIDE.md` (setup and troubleshooting), `DEVELOPMENT.md` (architecture), `SECURITY.md` (threat model), `CHANGELOG.md`.
+- `site/` is the GitHub Pages landing page; `.github/workflows/docs.yml` deploys it next to the versioned rustdoc.
