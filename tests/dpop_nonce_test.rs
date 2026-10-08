@@ -24,6 +24,11 @@ fn proof_nonce(headers: &HeaderMap) -> Option<String> {
     claims.get("nonce")?.as_str().map(str::to_string)
 }
 
+/// A server-issued nonce: random, as a real server's would be.
+fn fresh_nonce() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 fn nonce_challenge(nonce: &str) -> axum::response::Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -94,13 +99,14 @@ fn ping() -> Value {
 #[tokio::test]
 async fn test_resource_server_nonce_is_retried_without_reauth() {
     let counters = Counters::default();
+    let nonce = fresh_nonce();
     let app = Router::new()
         .route(
             "/rpc",
             post(|State(c): State<Counters>, headers: HeaderMap| async move {
                 c.rpc.fetch_add(1, Ordering::SeqCst);
-                if proof_nonce(&headers).as_deref() != Some("rs-1") {
-                    return nonce_challenge("rs-1");
+                if proof_nonce(&headers) != Some(nonce.clone()) {
+                    return nonce_challenge(&nonce);
                 }
                 Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})).into_response()
             }),
@@ -138,8 +144,8 @@ async fn test_resource_server_nonce_retry_happens_once() {
             "/rpc",
             post(|State(c): State<Counters>| async move {
                 // A fresh nonce every time: never satisfiable.
-                let n = c.rpc.fetch_add(1, Ordering::SeqCst);
-                nonce_challenge(&format!("rs-{n}"))
+                c.rpc.fetch_add(1, Ordering::SeqCst);
+                nonce_challenge(&fresh_nonce())
             }),
         )
         .with_state(counters.clone());
@@ -154,6 +160,7 @@ async fn test_resource_server_nonce_retry_happens_once() {
 #[tokio::test]
 async fn test_authorization_server_nonce_on_refresh() {
     let counters = Counters::default();
+    let nonce = fresh_nonce();
     let app = Router::new()
         .route(
             "/rpc",
@@ -177,10 +184,10 @@ async fn test_authorization_server_nonce_on_refresh() {
                  Form(form): Form<HashMap<String, String>>| async move {
                     c.token.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(form["grant_type"], "refresh_token");
-                    if proof_nonce(&headers).as_deref() != Some("as-1") {
+                    if proof_nonce(&headers) != Some(nonce.clone()) {
                         return (
                             StatusCode::BAD_REQUEST,
-                            [("DPoP-Nonce", "as-1")],
+                            [("DPoP-Nonce", nonce)],
                             Json(json!({"error": "use_dpop_nonce"})),
                         )
                             .into_response();

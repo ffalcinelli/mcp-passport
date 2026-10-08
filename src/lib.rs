@@ -677,7 +677,13 @@ mod tests {
         ));
 
         client_in.write_all(format!("{call}\n").as_bytes()).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Cancel only once the server is streaming: a cancellation that beats the
+        // request there leaves nothing to close. A fixed delay is not enough when
+        // the tests run slowly (e.g. under coverage instrumentation).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while posted.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
             "params": {"requestId": call["id"], "reason": "user"}});
         client_in

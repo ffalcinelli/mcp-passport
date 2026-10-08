@@ -169,8 +169,7 @@ async fn test_keycloak_26_8_with_mcp_2026_07_28() -> anyhow::Result<()> {
     assert_eq!(meta.issuer.as_deref(), Some(kc.realm().as_str()));
     assert!(
         meta.scopes.contains(&"mcp:tools".to_string()),
-        "{:?}",
-        meta.scopes
+        "credential metadata lacks mcp:tools"
     );
     assert!(
         vault.get_refresh_token("jdoe")?.is_some(),
@@ -216,7 +215,7 @@ async fn test_keycloak_26_8_with_mcp_2026_07_28() -> anyhow::Result<()> {
     let scopes = vault.get_meta("jdoe")?.unwrap().scopes;
     assert!(
         scopes.contains(&"mcp:tools".to_string()) && scopes.contains(&"mcp:admin".to_string()),
-        "step-up keeps earlier scopes: {scopes:?}"
+        "step-up must keep mcp:tools and add mcp:admin"
     );
 
     // 4. A rejected token is renewed with Keycloak's refresh token, silently.
@@ -233,10 +232,13 @@ async fn test_keycloak_26_8_with_mcp_2026_07_28() -> anyhow::Result<()> {
         .await?
         .unwrap();
     assert_eq!(again["result"]["content"][0]["text"], "region=us-east1");
-    assert_ne!(vault.get_token("jdoe")?, token_before, "a new access token");
-    assert_ne!(
-        vault.get_refresh_token("jdoe")?,
-        refresh_before,
+    // `assert!`, not `assert_ne!`: a failure must not print the tokens.
+    assert!(
+        vault.get_token("jdoe")? != token_before,
+        "a new access token"
+    );
+    assert!(
+        vault.get_refresh_token("jdoe")? != refresh_before,
         "a rotated refresh token"
     );
     assert!(slot.lock().await.is_none(), "no browser login was needed");
