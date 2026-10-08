@@ -152,7 +152,7 @@ impl Proxy {
         remote_url: &str,
         user_id: &str,
         oidc_config: OidcConfig,
-        service: &str,
+        vault: Vault,
         protocol_version: &str,
         auth_scheme: AuthScheme,
     ) -> Arc<Self> {
@@ -162,7 +162,7 @@ impl Proxy {
             remote_url: remote_url.to_string(),
             suspension_rx: rx,
             suspension_tx: tx,
-            vault: Vault::new(service),
+            vault,
             user_id: user_id.to_string(),
             oidc_config,
             auth_manager: Arc::new(RwLock::new(None)),
@@ -212,7 +212,7 @@ impl Proxy {
         let am = AuthManager::discover(
             self.oidc_config.clone(),
             self.remote_url.clone(), // This is the 'resource'
-            &self.vault.service,
+            self.vault.clone(),
             metadata_url,
         )
         .await?;
@@ -768,7 +768,6 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             template_dir: None,
         };
-        let service = "test_service";
         let protocol_version = "2024-11-05";
         let auth_scheme = AuthScheme::Dpop;
 
@@ -776,7 +775,7 @@ mod tests {
             remote_url,
             user_id,
             oidc_config.clone(),
-            service,
+            Vault::in_memory("test_service"),
             protocol_version,
             auth_scheme,
         );
@@ -1007,7 +1006,7 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );
@@ -1048,6 +1047,7 @@ mod tests {
             let _ = axum::serve(listener, mcp_app).await;
         });
 
+        let vault = Vault::in_memory("svc_retry");
         let proxy = Proxy::new(
             &rpc_url,
             "user_retry",
@@ -1062,13 +1062,10 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc_retry",
+            vault.clone(),
             "v1",
             AuthScheme::Bearer,
         );
-
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-        let vault = Vault::new("svc_retry");
 
         // Background task to keep updating the token so trigger_reauth returns Ok(()) (redundant check)
         let vault_clone = vault.clone();
@@ -1118,6 +1115,7 @@ mod tests {
             let _ = axum::serve(listener, mcp_app).await;
         });
 
+        let vault = Vault::in_memory("svc");
         let proxy = Proxy::new(
             &rpc_url,
             "user",
@@ -1132,13 +1130,10 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            vault.clone(),
             "v1",
             AuthScheme::Bearer,
         );
-
-        let vault = Vault::new("svc");
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         vault.store_token("user", "token")?;
         vault.store_dpop_key("user", &crate::crypto::DpopKey::generate().to_bytes())?;
 
@@ -1150,7 +1145,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_proxy_reauth_loop_detection() -> Result<()> {
+    async fn test_proxy_reauth_failure_resets_circuit_breaker() -> Result<()> {
         let proxy = Proxy::new(
             "http://localhost:1/rpc",
             "user",
@@ -1165,17 +1160,22 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );
 
-        // First attempt will fail (ensure_auth_manager will fail)
-        let _ = proxy.trigger_reauth(None, None, None).await;
+        // First attempt fails (the redirect URL is invalid, so no loopback server).
+        let first = proxy.trigger_reauth(None, None, None).await;
+        assert!(first.is_err());
+        assert!(proxy.last_reauth.lock().await.is_none());
 
-        // Second attempt immediately should hit loop detection
-        let res = proxy.trigger_reauth(None, None, None).await;
-        assert!(res.is_ok()); // It returns Ok(()) and skips re-auth
+        // A failed attempt must not arm the loop detector: retrying right away
+        // runs the flow again (and fails for the same reason) instead of
+        // reporting an authentication loop.
+        let second = proxy.trigger_reauth(None, None, None).await;
+        let err = second.unwrap_err().to_string();
+        assert!(!err.contains("Authentication loop detected"), "{err}");
         Ok(())
     }
 
@@ -1195,7 +1195,7 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );
@@ -1232,7 +1232,7 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );
@@ -1258,6 +1258,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_trigger_reauth_cooldown() -> Result<()> {
+        let vault = Vault::in_memory("svc");
         let proxy = Proxy::new(
             "http://localhost:1/rpc",
             "user",
@@ -1272,13 +1273,10 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            vault.clone(),
             "v1",
             AuthScheme::Bearer,
         );
-
-        let vault = Vault::new("svc");
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         vault.store_token("user", "token")?;
 
         // Set last_reauth to now and reauth_count to 1
@@ -1298,6 +1296,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_trigger_reauth_redundant_skip() -> Result<()> {
+        let vault = Vault::in_memory("svc");
         let proxy = Proxy::new(
             "http://localhost:1/rpc",
             "user",
@@ -1312,13 +1311,10 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            vault.clone(),
             "v1",
             AuthScheme::Bearer,
         );
-
-        let vault = Vault::new("svc");
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         vault.store_token("user", "new_token")?;
 
         // trigger_reauth with an old failing token should skip re-auth if current token is different
@@ -1344,7 +1340,7 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );
@@ -1376,7 +1372,7 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );

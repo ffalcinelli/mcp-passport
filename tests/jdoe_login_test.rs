@@ -5,6 +5,7 @@ use fantoccini::{ClientBuilder, Locator};
 use mcp_passport::auth::OidcConfig;
 use mcp_passport::config::AuthScheme;
 use mcp_passport::proxy::Proxy;
+use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,7 +80,6 @@ async fn mock_mcp_handler(
 #[ignore]
 async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     // 0. Setup environment and tracing
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
 
     let _ = tracing_subscriber::fmt()
@@ -182,7 +182,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
         &mock_url,
         user_id,
         oidc_config.clone(),
-        "mcp-passport-jdoe-test",
+        Vault::in_memory("mcp-passport-jdoe-test"),
         "2025-11-25",
         AuthScheme::Bearer,
     );

@@ -3,40 +3,78 @@
 //! This module provides an abstraction over the system's native secure storage
 //! (macOS Keychain, Windows Credential Manager, Linux Secret Service) via the `keyring` crate.
 //!
-//! It also includes an in-memory fallback for headless or testing environments.
+//! It also includes an in-memory backend for headless or testing environments.
 
 use crate::Result;
 use anyhow::Context;
 use keyring::Entry;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-#[allow(dead_code)]
-pub(crate) static TEST_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
-    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+/// The kind of secret stored in the vault. Each kind lives in its own keyring entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Secret {
+    Token,
+    DpopKey,
+}
 
-// In-memory fallback for testing and headless environments where system keyring might be missing/unavailable
-pub(crate) static MEMORY_VAULT: Lazy<Mutex<HashMap<String, String>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+impl Secret {
+    /// Suffix used for the in-memory key and the keyring service name.
+    fn suffix(self) -> &'static str {
+        match self {
+            Secret::Token => "token",
+            Secret::DpopKey => "dpop",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Secret::Token => "token",
+            Secret::DpopKey => "DPoP key",
+        }
+    }
+}
+
+#[derive(Clone)]
+enum Backend {
+    /// The operating system's credential store.
+    Keyring,
+    /// A process-local store. Clones of the same `Vault` share it.
+    Memory(Arc<Mutex<HashMap<String, String>>>),
+}
 
 /// A secure storage abstraction for tokens and keys.
 #[derive(Clone)]
 pub struct Vault {
     /// The service name used for isolation in the keychain.
     pub service: String,
-    /// Whether to bypass the system keychain and use an in-memory store.
-    use_memory: bool,
+    backend: Backend,
 }
 
 impl Vault {
-    /// Creates a new Vault instance for a given service name.
-    pub fn new(service: &str) -> Self {
-        // Automatically use memory vault if environment variable is set
-        let use_memory = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT").is_ok();
+    /// Creates a vault backed by the OS keychain.
+    pub fn keyring(service: &str) -> Self {
         Self {
             service: service.to_string(),
-            use_memory,
+            backend: Backend::Keyring,
+        }
+    }
+
+    /// Creates a vault backed by a fresh, process-local in-memory store.
+    pub fn in_memory(service: &str) -> Self {
+        Self {
+            service: service.to_string(),
+            backend: Backend::Memory(Arc::new(Mutex::new(HashMap::new()))),
+        }
+    }
+
+    /// Uses the in-memory backend when `MCP_PASSPORT_USE_MEMORY_VAULT` is set,
+    /// otherwise the OS keychain.
+    pub fn from_env(service: &str) -> Self {
+        if std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT").is_ok() {
+            Self::in_memory(service)
+        } else {
+            Self::keyring(service)
         }
     }
 
@@ -44,119 +82,92 @@ impl Vault {
         format!("{}:{}:{}", self.service, user_id, suffix)
     }
 
-    /// Stores an access token securely in the vault.
-    pub fn store_token(&self, user_id: &str, token: &str) -> Result<()> {
-        if self.use_memory {
-            let key = self.make_key(user_id, "token");
-            MEMORY_VAULT
+    fn keyring_entry(&self, user_id: &str, secret: Secret) -> Result<Entry> {
+        let service = match secret {
+            // Kept as the bare service name for backwards compatibility.
+            Secret::Token => self.service.clone(),
+            _ => format!("{}-{}", self.service, secret.suffix()),
+        };
+        Ok(Entry::new(&service, user_id)?)
+    }
+
+    fn set(&self, user_id: &str, secret: Secret, value: &str) -> Result<()> {
+        match &self.backend {
+            Backend::Memory(store) => {
+                store
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
+                    .insert(self.make_key(user_id, secret.suffix()), value.to_string());
+                Ok(())
+            }
+            Backend::Keyring => self
+                .keyring_entry(user_id, secret)?
+                .set_password(value)
+                .with_context(|| format!("Failed to store {} in vault", secret.label())),
+        }
+    }
+
+    fn get(&self, user_id: &str, secret: Secret) -> Result<Option<String>> {
+        match &self.backend {
+            Backend::Memory(store) => Ok(store
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
-                .insert(key, token.to_string());
-            return Ok(());
+                .get(&self.make_key(user_id, secret.suffix()))
+                .cloned()),
+            Backend::Keyring => match self.keyring_entry(user_id, secret)?.get_password() {
+                Ok(v) => Ok(Some(v)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(e) => Err(anyhow::anyhow!(e)
+                    .context(format!("Failed to retrieve {} from vault", secret.label()))),
+            },
         }
-        let entry = Entry::new(&self.service, user_id)?;
-        entry
-            .set_password(token)
-            .context("Failed to store token in vault")?;
+    }
+
+    fn delete(&self, user_id: &str, secret: Secret) -> Result<()> {
+        match &self.backend {
+            Backend::Memory(store) => {
+                store
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
+                    .remove(&self.make_key(user_id, secret.suffix()));
+            }
+            Backend::Keyring => {
+                let _ = self.keyring_entry(user_id, secret)?.delete_credential();
+            }
+        }
         Ok(())
+    }
+
+    /// Stores an access token securely in the vault.
+    pub fn store_token(&self, user_id: &str, token: &str) -> Result<()> {
+        self.set(user_id, Secret::Token, token)
     }
 
     /// Retrieves an access token from the vault.
     pub fn get_token(&self, user_id: &str) -> Result<Option<String>> {
-        if self.use_memory {
-            let key = self.make_key(user_id, "token");
-            return Ok(MEMORY_VAULT
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
-                .get(&key)
-                .cloned());
-        }
-        let entry = Entry::new(&self.service, user_id)?;
-        match entry.get_password() {
-            Ok(token) => Ok(Some(token)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!(e).context("Failed to retrieve token from vault")),
-        }
+        self.get(user_id, Secret::Token)
     }
 
     /// Deletes an access token from the vault.
     pub fn delete_token(&self, user_id: &str) -> Result<()> {
-        if self.use_memory {
-            let key = self.make_key(user_id, "token");
-            MEMORY_VAULT
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
-                .remove(&key);
-            return Ok(());
-        }
-        let entry = Entry::new(&self.service, user_id)?;
-        let _ = entry.delete_credential();
-        Ok(())
+        self.delete(user_id, Secret::Token)
     }
 
     /// Stores the DPoP private key securely.
     pub fn store_dpop_key(&self, user_id: &str, key_bytes: &[u8]) -> Result<()> {
-        let key_hex = hex::encode(key_bytes);
-        if self.use_memory {
-            let key = self.make_key(user_id, "dpop");
-            MEMORY_VAULT
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
-                .insert(key, key_hex);
-            return Ok(());
-        }
-        let dpop_service = format!("{}-dpop", self.service);
-        let entry = Entry::new(&dpop_service, user_id)?;
-        entry
-            .set_password(&key_hex)
-            .context("Failed to store DPoP key in vault")?;
-        Ok(())
+        self.set(user_id, Secret::DpopKey, &hex::encode(key_bytes))
     }
 
     /// Retrieves the DPoP private key from the vault.
     pub fn get_dpop_key(&self, user_id: &str) -> Result<Option<Vec<u8>>> {
-        let key_hex = if self.use_memory {
-            let key = self.make_key(user_id, "dpop");
-            MEMORY_VAULT
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
-                .get(&key)
-                .cloned()
-        } else {
-            let dpop_service = format!("{}-dpop", self.service);
-            let entry = Entry::new(&dpop_service, user_id)?;
-            match entry.get_password() {
-                Ok(h) => Some(h),
-                Err(keyring::Error::NoEntry) => None,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(e).context("Failed to retrieve DPoP key from vault"))
-                }
-            }
-        };
-
-        match key_hex {
-            Some(h) => {
-                let bytes = hex::decode(&h).context("Failed to decode DPoP key hex")?;
-                Ok(Some(bytes))
-            }
-            None => Ok(None),
-        }
+        self.get(user_id, Secret::DpopKey)?
+            .map(|h| hex::decode(h).context("Failed to decode DPoP key hex"))
+            .transpose()
     }
 
     /// Deletes the DPoP private key from the vault.
     pub fn delete_dpop_key(&self, user_id: &str) -> Result<()> {
-        if self.use_memory {
-            let key = self.make_key(user_id, "dpop");
-            MEMORY_VAULT
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
-                .remove(&key);
-            return Ok(());
-        }
-        let dpop_service = format!("{}-dpop", self.service);
-        let entry = Entry::new(&dpop_service, user_id)?;
-        let _ = entry.delete_credential();
-        Ok(())
+        self.delete(user_id, Secret::DpopKey)
     }
 }
 
@@ -166,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_make_key() {
-        let vault = Vault::new("my-service");
+        let vault = Vault::in_memory("my-service");
 
         // Happy path
         assert_eq!(
@@ -188,141 +199,75 @@ mod tests {
 
     #[test]
     fn test_vault_token_ops() -> Result<()> {
-        let _test_lock = TEST_MUTEX.lock().unwrap();
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-        std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
-        let vault = Vault::new("mcp-passport-test");
+        let vault = Vault::in_memory("mcp-passport-test");
         let user = "test_user_1";
         let token = "test_token_123";
 
-        // Store
         vault.store_token(user, token)?;
+        assert_eq!(vault.get_token(user)?, Some(token.to_string()));
 
-        // Get
-        let retrieved = vault.get_token(user)?;
-        assert_eq!(retrieved, Some(token.to_string()));
-
-        // Delete
         vault.delete_token(user)?;
-        let deleted = vault.get_token(user)?;
-        assert_eq!(deleted, None);
+        assert_eq!(vault.get_token(user)?, None);
         Ok(())
     }
 
     #[test]
     fn test_delete_nonexistent_token() -> Result<()> {
-        let _test_lock = TEST_MUTEX.lock().unwrap();
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-        let vault = Vault::new("mcp-passport-test-nonexistent");
-
-        let res = vault.delete_token("non_existent_user");
-        assert!(res.is_ok());
-
+        let vault = Vault::in_memory("mcp-passport-test-nonexistent");
+        assert!(vault.delete_token("non_existent_user").is_ok());
         Ok(())
     }
 
     #[test]
     fn test_vault_dpop_ops() -> Result<()> {
-        let _test_lock = TEST_MUTEX.lock().unwrap();
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-        let vault = Vault::new("mcp-passport-test");
+        let vault = Vault::in_memory("mcp-passport-test");
         let user = "test_user_dpop";
         let key_bytes = b"test_key_bytes_123456789012345678";
 
-        // Store
         vault.store_dpop_key(user, key_bytes)?;
+        assert_eq!(vault.get_dpop_key(user)?, Some(key_bytes.to_vec()));
 
-        // Get
-        let retrieved = vault.get_dpop_key(user)?;
-        assert_eq!(retrieved, Some(key_bytes.to_vec()));
+        assert_eq!(vault.get_dpop_key("non_existent")?, None);
 
-        // Non-existent user
-        let none = vault.get_dpop_key("non_existent")?;
-        assert_eq!(none, None);
-
-        // Delete
         vault.delete_dpop_key(user)?;
-        let deleted = vault.get_dpop_key(user)?;
-        assert_eq!(deleted, None);
-
+        assert_eq!(vault.get_dpop_key(user)?, None);
         Ok(())
     }
 
     #[test]
     fn test_delete_nonexistent_dpop_key() -> Result<()> {
-        let _test_lock = TEST_MUTEX.lock().unwrap();
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-        let vault = Vault::new("mcp-passport-test-nonexistent-dpop");
-
-        let res = vault.delete_dpop_key("non_existent_user");
-        assert!(res.is_ok());
-
+        let vault = Vault::in_memory("mcp-passport-test-nonexistent-dpop");
+        assert!(vault.delete_dpop_key("non_existent_user").is_ok());
         Ok(())
     }
 
     #[test]
     fn test_vault_dpop_hex_failure() -> Result<()> {
-        let _test_lock = TEST_MUTEX.lock().unwrap();
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-        let vault = Vault::new("mcp-passport-test");
+        let vault = Vault::in_memory("mcp-passport-test");
         let user = "test_user_bad_hex";
-
-        // Directly inject invalid hex into MEMORY_VAULT
-        let key = vault.make_key(user, "dpop");
-        MEMORY_VAULT
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?
-            .insert(key, "invalid hex".to_string());
+        vault.set(user, Secret::DpopKey, "invalid hex")?;
 
         let res = vault.get_dpop_key(user);
         assert!(res.is_err());
         assert!(format!("{:?}", res.err().unwrap()).contains("Failed to decode DPoP key hex"));
-
         Ok(())
     }
 
     #[test]
-    fn test_vault_dpop_key_mutex_poisoned() -> Result<()> {
-        let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
-        let _test_lock = TEST_MUTEX.lock().unwrap();
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+    fn test_in_memory_vaults_are_isolated_but_clones_share() -> Result<()> {
+        let a = Vault::in_memory("svc");
+        let b = Vault::in_memory("svc");
+        let a2 = a.clone();
 
-        let vault = Vault::new("mcp-passport-test");
-        let user = "test_user_poison";
-
-        let _ = std::panic::catch_unwind(|| {
-            let _lock = MEMORY_VAULT.lock().unwrap();
-            panic!("Intentional panic to poison mutex");
-        });
-
-        let res = vault.get_dpop_key(user);
-
-        MEMORY_VAULT.clear_poison();
-
-        let is_err = res.is_err();
-        let err_msg = res.map_err(|e| e.to_string()).err().unwrap_or_default();
-
-        if let Ok(val) = old_val {
-            std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", val);
-        } else {
-            std::env::remove_var("MCP_PASSPORT_USE_MEMORY_VAULT");
-        }
-
-        assert!(is_err);
-        assert!(err_msg.contains("Mutex poisoned"));
-
+        a.store_token("user", "token-a")?;
+        assert_eq!(a2.get_token("user")?, Some("token-a".into()));
+        assert_eq!(b.get_token("user")?, None);
         Ok(())
     }
 
     #[test]
     fn test_vault_real_keyring_attempt() {
-        let _test_lock = TEST_MUTEX.lock().unwrap();
-        // We don't set MCP_PASSPORT_USE_MEMORY_VAULT here
-        let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
-        std::env::remove_var("MCP_PASSPORT_USE_MEMORY_VAULT");
-
-        let vault = Vault::new("mcp-passport-unit-test-real");
-        assert!(!vault.use_memory);
+        let vault = Vault::keyring("mcp-passport-unit-test-real");
 
         // This will likely fail in CI but it's okay, we just want to cover the lines.
         // We use a dummy user to avoid messing up real keys.
@@ -332,10 +277,5 @@ mod tests {
         let _ = vault.store_dpop_key("dummy_user_test", b"dummy");
         let _ = vault.get_dpop_key("dummy_user_test");
         let _ = vault.delete_dpop_key("dummy_user_test");
-
-        // Restore env var
-        if let Ok(val) = old_val {
-            std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", val);
-        }
     }
 }

@@ -128,7 +128,7 @@ impl AuthManager {
     pub async fn discover(
         mut oidc_config: OidcConfig,
         resource: String,
-        service: &str,
+        vault: Vault,
         metadata_url_override: Option<&str>,
     ) -> Result<Self> {
         let http_client = HttpClient::new();
@@ -220,7 +220,7 @@ impl AuthManager {
             redirect_url: oidc_config.redirect_url,
             resource,
             http_client,
-            vault: Vault::new(service),
+            vault,
             internal_url_tx: oidc_config.internal_url_tx,
             internal_callback_tx: oidc_config.internal_callback_tx,
             success_html: Arc::new(success_html),
@@ -648,7 +648,7 @@ mod tests {
             redirect_url: "r".into(),
             resource: "res".into(),
             http_client: reqwest::Client::new(),
-            vault: Vault::new("svc_test_set_internal_callback_tx"),
+            vault: Vault::in_memory("svc_test_set_internal_callback_tx"),
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
@@ -822,7 +822,7 @@ mod tests {
             redirect_url: "r".into(),
             resource: "res".into(),
             http_client: reqwest::Client::new(),
-            vault: Vault::new("svc_test_set_internal_url_tx"),
+            vault: Vault::in_memory("svc_test_set_internal_url_tx"),
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
@@ -840,7 +840,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_manager_get_token_fresh() -> Result<()> {
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let am = AuthManager {
             client_id: "c".into(),
             auth_url: "a".into(),
@@ -849,7 +848,7 @@ mod tests {
             redirect_url: "r".into(),
             resource: "res".into(),
             http_client: reqwest::Client::new(),
-            vault: Vault::new("svc_test_get_token"),
+            vault: Vault::in_memory("svc_test_get_token"),
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
@@ -876,7 +875,8 @@ mod tests {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             template_dir: None,
         };
-        let res = AuthManager::discover(config, "res".to_string(), "svc", None).await;
+        let res =
+            AuthManager::discover(config, "res".to_string(), Vault::in_memory("svc"), None).await;
         assert!(res.is_err());
     }
 
@@ -890,7 +890,7 @@ mod tests {
             redirect_url: "r".into(),
             resource: "res".into(),
             http_client: reqwest::Client::new(),
-            vault: Vault::new("svc_test_token_fail"),
+            vault: Vault::in_memory("svc_test_token_fail"),
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
@@ -908,7 +908,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_manager_reauthenticate_addr_in_use() -> Result<()> {
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
 
@@ -920,7 +919,7 @@ mod tests {
             redirect_url: format!("http://127.0.0.1:{}/callback", addr.port()),
             resource: "res".into(),
             http_client: reqwest::Client::new(),
-            vault: Vault::new("svc_test_addr_in_use"),
+            vault: Vault::in_memory("svc_test_addr_in_use"),
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),
@@ -958,7 +957,7 @@ mod tests {
             redirect_url: format!("http://127.0.0.1:{}/callback", cb_addr.port()),
             resource: "res".into(),
             http_client: reqwest::Client::new(),
-            vault: Vault::new("svc_test_reauth_timeout"),
+            vault: Vault::in_memory("svc_test_reauth_timeout"),
             internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             issuer_name: "Mock Issuer".into(),

@@ -3,8 +3,7 @@ use mcp_passport::crypto::DpopKey;
 use mcp_passport::vault::Vault;
 
 fn criterion_benchmark(c: &mut Criterion) {
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-    let vault = Vault::new("bench_svc");
+    let vault = Vault::in_memory("bench_svc");
     let _ = vault.store_token("bench_user", "test_token_1234567890");
     let _ = vault.store_dpop_key("bench_user", &DpopKey::generate().to_bytes());
 

@@ -34,7 +34,7 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         let _ = axum::serve(mcp_listener, mcp_app).await;
     });
 
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token("sse_user", "valid_token")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key("sse_user", &dpop_key.to_bytes())?;
@@ -54,7 +54,7 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
         "http://unused",
         "sse_user",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -77,7 +77,7 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-loop-v4";
-    let _ = Vault::new(test_svc).delete_token("loop_user");
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -127,7 +127,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         &rpc_url,
         "loop_user",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -156,6 +156,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_discovery_url_construction() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-discovery-v1";
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new()
         .route(
@@ -213,7 +214,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
         &format!("{}/rpc-with-meta", base_url),
         "user1",
         oidc_config.clone(),
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -229,7 +230,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
         &format!("{}/rpc-no-meta", base_url),
         "user2",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -248,7 +249,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
 async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-regression-v1";
     let user = "reg_user";
-    let _ = Vault::new(test_svc).delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let auth_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
@@ -319,7 +320,7 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
         &format!("{}/rpc", base_url),
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -352,7 +353,7 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
 async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-max-retries";
     let user = "retry_user";
-    let _ = Vault::new(test_svc).delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -395,7 +396,7 @@ async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
         &rpc_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -414,8 +415,7 @@ async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
 async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-sse-401";
     let user = "sse_401_user";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/sse",
@@ -456,7 +456,7 @@ async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
         &sse_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -487,7 +487,7 @@ async fn test_discovery_failure_handling() -> anyhow::Result<()> {
         template_dir: None,
     };
 
-    let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
+    let res = AuthManager::discover(oidc_config, "res".into(), Vault::in_memory("svc"), None).await;
     assert!(res.is_err());
     Ok(())
 }
@@ -526,7 +526,7 @@ async fn test_discovery_missing_par_endpoint() -> anyhow::Result<()> {
         template_dir: None,
     };
 
-    let res = AuthManager::discover(oidc_config, "res".into(), "svc", None).await;
+    let res = AuthManager::discover(oidc_config, "res".into(), Vault::in_memory("svc"), None).await;
     assert!(res.is_err());
     Ok(())
 }
@@ -560,7 +560,7 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
             template_dir: None,
         },
         "res".into(),
-        "svc",
+        Vault::in_memory("svc"),
         None,
     )
     .await?;
@@ -572,10 +572,9 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_403_step_up_trigger() -> anyhow::Result<()> {
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     let test_svc = "mcp-passport-test-403";
     let user = "stepup_user";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token(user, "valid_but_low_scope")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key(user, &dpop_key.to_bytes())?;
@@ -638,7 +637,7 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
         &rpc_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -658,7 +657,7 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
 async fn test_sse_non_401_error() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-sse-err";
     let user = "sse_err_user";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token(user, "t")?;
     vault.store_dpop_key(user, &DpopKey::generate().to_bytes())?;
 
@@ -688,7 +687,7 @@ async fn test_sse_non_401_error() -> anyhow::Result<()> {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             template_dir: None,
         },
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -707,8 +706,7 @@ async fn test_sse_non_401_error() -> anyhow::Result<()> {
 async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-redundant";
     let user = "redundant_user";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -744,7 +742,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             template_dir: None,
         },
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -773,7 +771,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
 async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-nocontent";
     let user = "nocontent_user";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token(user, "valid_token")?;
     vault.store_dpop_key(user, &DpopKey::generate().to_bytes())?;
 
@@ -811,7 +809,7 @@ async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
             internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
             template_dir: None,
         },
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -837,8 +835,7 @@ async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
 async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
     let test_svc = "mcp-passport-test-timeout";
     let user = "timeout_user";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token(user);
+    let vault = Vault::in_memory(test_svc);
 
     let mcp_app = Router::new().route(
         "/rpc",
@@ -877,7 +874,7 @@ async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
         &rpc_url,
         user,
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );
@@ -899,9 +896,6 @@ async fn test_lib_run_minimal() -> anyhow::Result<()> {
     use mcp_passport::config::Config;
     use tokio::io::AsyncWriteExt;
 
-    let test_svc = "mcp-passport-test-run";
-    let _ = Vault::new(test_svc).delete_token("run_user");
-
     let mcp_app = Router::new().route(
         "/rpc",
         post(|| async move { axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": "ok"})) }),
@@ -914,8 +908,7 @@ async fn test_lib_run_minimal() -> anyhow::Result<()> {
     });
 
     // Pre-populate vault to skip OIDC
-    let vault = Vault::new("mcp-passport"); // default service in run()
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+    let vault = Vault::in_memory("mcp-passport-test-run");
     vault.store_token("run_user", "valid")?;
     vault.store_dpop_key("run_user", &DpopKey::generate().to_bytes())?;
 
@@ -936,8 +929,9 @@ async fn test_lib_run_minimal() -> anyhow::Result<()> {
     let (_client_out_rx, server_out_tx) = tokio::io::duplex(1024);
     let (mut client_in_tx, server_in_rx) = tokio::io::duplex(1024);
 
-    let run_handle =
-        tokio::spawn(async move { mcp_passport::run(config, server_in_rx, server_out_tx).await });
+    let run_handle = tokio::spawn(async move {
+        mcp_passport::run_with_vault(config, vault, server_in_rx, server_out_tx).await
+    });
 
     client_in_tx
         .write_all(b"{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"test\"}\n")

@@ -69,7 +69,6 @@ struct AppState {
 #[ignore]
 async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     // Ensure we use the memory vault and skip browser for reliability in all environments
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
 
     // 0. Setup tracing
@@ -193,13 +192,12 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
 
     // 5. Initialize Proxy
     let test_svc = "mcp-passport-compliance-headless-v1";
-    let vault = Vault::new(test_svc);
-    let _ = vault.delete_token("mock_user");
+    let vault = Vault::in_memory(test_svc);
     let proxy = Proxy::new(
         &mcp_url,
         "mock_user",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Bearer,
     );

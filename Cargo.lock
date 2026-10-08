@@ -1737,7 +1737,6 @@ dependencies = [
  "hex",
  "html-escape",
  "keyring",
- "once_cell",
  "open",
  "p256",
  "rand 0.9.4",

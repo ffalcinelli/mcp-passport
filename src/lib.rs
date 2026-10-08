@@ -8,6 +8,7 @@ pub mod vault;
 use crate::auth::OidcConfig;
 use crate::config::Config;
 use crate::proxy::Proxy;
+use crate::vault::Vault;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -17,7 +18,24 @@ use tracing::{error, info};
 /// Shared result type for the crate.
 pub type Result<T> = anyhow::Result<T>;
 
-pub async fn run<R, W>(config: Config, stdin: R, mut stdout: W) -> Result<()>
+/// Runs the proxy using the vault backend selected by the environment
+/// (OS keychain unless `MCP_PASSPORT_USE_MEMORY_VAULT` is set).
+pub async fn run<R, W>(config: Config, stdin: R, stdout: W) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let vault = Vault::from_env("mcp-passport");
+    run_with_vault(config, vault, stdin, stdout).await
+}
+
+/// Runs the proxy with an explicit vault.
+pub async fn run_with_vault<R, W>(
+    config: Config,
+    vault: Vault,
+    stdin: R,
+    mut stdout: W,
+) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -54,7 +72,7 @@ where
         &config.remote_mcp_url,
         &config.user_id,
         oidc_config,
-        "mcp-passport",
+        vault,
         &config.mcp_protocol_version,
         config.auth_scheme,
     );
@@ -145,7 +163,6 @@ async fn process_message(proxy: Arc<Proxy>, line: String, stdout_tx: mpsc::Sende
 mod tests {
     use super::*;
     use crate::config::AuthScheme;
-    use crate::vault::Vault;
     use axum::{routing::post, Router};
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -167,7 +184,7 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );
@@ -193,7 +210,7 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "svc",
+            Vault::in_memory("svc"),
             "v1",
             AuthScheme::Bearer,
         );
@@ -210,9 +227,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_message_with_id() -> Result<()> {
-        let old_val = std::env::var("MCP_PASSPORT_USE_MEMORY_VAULT");
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
-
         let (tx, mut rx) = mpsc::channel(1);
 
         let mcp_app = Router::new().route(
@@ -226,6 +240,7 @@ mod tests {
             let _ = axum::serve(listener, mcp_app).await;
         });
 
+        let vault = Vault::in_memory("test_process_message_svc");
         let proxy = Proxy::new(
             &rpc_url,
             "user",
@@ -240,14 +255,12 @@ mod tests {
                 internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
                 template_dir: None,
             },
-            "test_process_message_svc",
+            vault.clone(),
             "v1",
             AuthScheme::Bearer,
         );
 
         // Pre-populate vault to skip OIDC
-        let vault = Vault::new("test_process_message_svc");
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
         vault.store_token("user", "valid")?;
         vault.store_dpop_key("user", &crate::crypto::DpopKey::generate().to_bytes())?;
 
@@ -260,14 +273,6 @@ mod tests {
         .await;
 
         let resp = rx.recv().await.expect("Expected a response");
-
-        crate::vault::MEMORY_VAULT.clear_poison();
-        if let Ok(val) = old_val {
-            std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", val);
-        } else {
-            std::env::remove_var("MCP_PASSPORT_USE_MEMORY_VAULT");
-        }
-
         assert!(resp.contains("\"result\":\"ok\""));
         Ok(())
     }
@@ -306,13 +311,13 @@ mod tests {
         };
 
         // Pre-populate vault to skip OIDC
-        let vault = Vault::new("mcp-passport");
-        std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
+        let vault = Vault::in_memory("mcp-passport");
         vault.store_token("test-user", "valid")?;
         vault.store_dpop_key("test-user", &crate::crypto::DpopKey::generate().to_bytes())?;
 
-        let run_handle =
-            tokio::spawn(async move { run(config, server_in_rx, server_out_tx).await });
+        let run_handle = tokio::spawn(async move {
+            run_with_vault(config, vault, server_in_rx, server_out_tx).await
+        });
 
         // Send a message
         client_in_tx

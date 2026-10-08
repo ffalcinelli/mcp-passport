@@ -49,7 +49,6 @@ async fn mock_mcp_handler(headers: HeaderMap, Json(payload): Json<Value>) -> Jso
 #[ignore]
 async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
     // Ensure we use the memory vault and skip browser for reliability in all environments
-    std::env::set_var("MCP_PASSPORT_USE_MEMORY_VAULT", "1");
     std::env::set_var("MCP_PASSPORT_SKIP_OPEN_BROWSER", "1");
 
     // 1. Setup tracing
@@ -97,7 +96,7 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
 
     // 4. Seed the vault for test_user
     let test_svc = "mcp-passport-keycloak-integration-v10";
-    let vault = Vault::new(test_svc);
+    let vault = Vault::in_memory(test_svc);
     vault.store_token("test_user_kc", "test_access_token")?;
     let dpop_key = DpopKey::generate();
     vault.store_dpop_key("test_user_kc", &dpop_key.to_bytes())?;
@@ -119,7 +118,7 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         &mock_url,
         "test_user_kc",
         oidc_config,
-        test_svc,
+        vault.clone(),
         "2025-11-25",
         AuthScheme::Dpop,
     );
