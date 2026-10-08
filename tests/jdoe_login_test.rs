@@ -7,7 +7,6 @@ use mcp_passport::config::AuthScheme;
 use mcp_passport::proxy::Proxy;
 use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::{core::Mount, core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::sync::oneshot;
@@ -170,12 +169,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
         discovery_url: Some(oidc_discovery),
         client_id: "mcp-passport".into(),
         redirect_url: redirect_url.to_string(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(

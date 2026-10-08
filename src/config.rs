@@ -104,6 +104,16 @@ pub struct Config {
     )]
     pub user_id: String,
 
+    /// Seconds to wait for the browser login to complete before giving up
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_AUTH_TIMEOUT_SECS",
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..),
+        help_heading = "Local State"
+    )]
+    pub auth_timeout_secs: u64,
+
     /// Directory containing success.html and failure.html for the auth callback
     #[arg(long, env = "MCP_PASSPORT_TEMPLATE_DIR", help_heading = "Local State")]
     pub template_dir: Option<std::path::PathBuf>,
@@ -157,6 +167,24 @@ mod tests {
         assert_eq!(config.oidc_client_id, "mcp-passport");
         assert_eq!(config.user_id, "default_user");
         assert_eq!(config.mcp_protocol_version, "2025-11-25");
+        assert_eq!(config.auth_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_config_auth_timeout() {
+        let base = [
+            "mcp-passport",
+            "--remote-mcp-url",
+            "http://mcp/rpc",
+            "--remote-sse-url",
+            "http://mcp/sse",
+        ];
+        let config =
+            Config::try_parse_from(base.iter().chain(&["--auth-timeout-secs", "42"])).unwrap();
+        assert_eq!(config.auth_timeout_secs, 42);
+
+        let zero = Config::try_parse_from(base.iter().chain(&["--auth-timeout-secs", "0"]));
+        assert!(zero.is_err());
     }
 
     #[test]

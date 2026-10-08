@@ -6,7 +6,6 @@ use mcp_passport::crypto::DpopKey;
 use mcp_passport::proxy::Proxy;
 use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::time::Duration;
 use testcontainers::{core::Mount, core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -103,15 +102,12 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
 
     // 5. Initialize OidcConfig and Proxy
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "mcp-passport".into(),
         redirect_url: "http://127.0.0.1:8082/callback".into(),
         auth_url_override: Some(format!("{}/auth", oidc_base)),
         token_url_override: Some(format!("{}/token", oidc_base)),
         par_url_override: Some(format!("{}/par", oidc_base)),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(

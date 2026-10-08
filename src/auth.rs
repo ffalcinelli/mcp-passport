@@ -27,6 +27,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
@@ -51,7 +52,67 @@ pub struct OidcConfig {
     pub internal_callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<SocketAddr>>>>,
     /// Directory containing custom templates for success/failure pages.
     pub template_dir: Option<std::path::PathBuf>,
+    /// Timeouts and retry delays used by the auth flow and the SSE listener.
+    pub timeouts: Timeouts,
 }
+
+impl Default for OidcConfig {
+    fn default() -> Self {
+        Self {
+            discovery_url: None,
+            client_id: String::new(),
+            redirect_url: String::new(),
+            auth_url_override: None,
+            token_url_override: None,
+            par_url_override: None,
+            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            template_dir: None,
+            timeouts: Timeouts::default(),
+        }
+    }
+}
+
+/// Timeouts and retry delays. `Default` holds the production values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Timeouts {
+    /// How long to wait for the user to complete the browser login.
+    pub auth: Duration,
+    /// Delay between attempts to bind the loopback callback port.
+    pub bind_retry: Duration,
+    /// Base delay before reconnecting a dropped SSE stream.
+    pub sse_retry_base: Duration,
+    /// Maximum random jitter added to `sse_retry_base`.
+    pub sse_retry_jitter: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            auth: Duration::from_secs(300),
+            bind_retry: Duration::from_secs(1),
+            sse_retry_base: Duration::from_secs(5),
+            sse_retry_jitter: Duration::from_secs(2),
+        }
+    }
+}
+
+impl Timeouts {
+    /// Short timeouts, intended for tests.
+    pub fn fast() -> Self {
+        Self {
+            auth: Duration::from_millis(500),
+            bind_retry: Duration::from_millis(10),
+            sse_retry_base: Duration::from_millis(10),
+            sse_retry_jitter: Duration::from_millis(10),
+        }
+    }
+}
+
+/// Connect timeout for every outbound HTTP connection.
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Total timeout for requests to the authorization server (discovery, PAR, token).
+const AS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl std::fmt::Debug for OidcConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -60,6 +121,7 @@ impl std::fmt::Debug for OidcConfig {
             .field("client_id", &self.client_id)
             .field("redirect_url", &self.redirect_url)
             .field("template_dir", &self.template_dir)
+            .field("timeouts", &self.timeouts)
             .finish()
     }
 }
@@ -95,6 +157,8 @@ pub struct AuthManager {
     issuer_name: String,
     /// Human-friendly name of the protected resource.
     resource_name: String,
+    /// Timeouts for the interactive flow.
+    timeouts: Timeouts,
 }
 
 #[derive(Deserialize, Debug)]
@@ -131,7 +195,11 @@ impl AuthManager {
         vault: Vault,
         metadata_url_override: Option<&str>,
     ) -> Result<Self> {
-        let http_client = HttpClient::new();
+        let http_client = HttpClient::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(AS_REQUEST_TIMEOUT)
+            .build()
+            .context("Failed to build HTTP client")?;
 
         let discovery_url = metadata_url_override.or(oidc_config.discovery_url.as_deref());
 
@@ -227,6 +295,7 @@ impl AuthManager {
             failure_html: Arc::new(failure_html),
             issuer_name,
             resource_name,
+            timeouts: oidc_config.timeouts,
         })
     }
 
@@ -274,12 +343,7 @@ impl AuthManager {
         self.open_auth_url(&par_data, url_tx).await;
 
         // 6. Wait for code from callback
-        let timeout_duration = if cfg!(test) {
-            std::time::Duration::from_millis(500)
-        } else {
-            std::time::Duration::from_secs(300)
-        };
-        let code = match tokio::time::timeout(timeout_duration, rx).await {
+        let code = match tokio::time::timeout(self.timeouts.auth, rx).await {
             Ok(Ok(c)) => c,
             _ => {
                 server_handle.abort();
@@ -338,12 +402,7 @@ impl AuthManager {
                         addr,
                         i + 1
                     );
-                    let wait = if cfg!(test) {
-                        std::time::Duration::from_millis(10)
-                    } else {
-                        std::time::Duration::from_secs(1)
-                    };
-                    tokio::time::sleep(wait).await;
+                    tokio::time::sleep(self.timeouts.bind_retry).await;
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -655,6 +714,7 @@ mod tests {
             resource_name: "Mock Resource".into(),
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            timeouts: Timeouts::fast(),
         };
 
         let (tx, _rx) = oneshot::channel::<SocketAddr>();
@@ -829,6 +889,7 @@ mod tests {
             resource_name: "Mock Resource".into(),
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            timeouts: Timeouts::fast(),
         };
 
         let (tx, _rx) = oneshot::channel::<String>();
@@ -855,6 +916,7 @@ mod tests {
             resource_name: "Mock Resource".into(),
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            timeouts: Timeouts::fast(),
         };
         am.vault.store_token("user", "token")?;
 
@@ -868,12 +930,8 @@ mod tests {
             discovery_url: Some("http://localhost:1/invalid".into()),
             client_id: "c".into(),
             redirect_url: "r".into(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            timeouts: crate::auth::Timeouts::fast(),
+            ..Default::default()
         };
         let res =
             AuthManager::discover(config, "res".to_string(), Vault::in_memory("svc"), None).await;
@@ -897,6 +955,7 @@ mod tests {
             resource_name: "Mock Resource".into(),
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            timeouts: Timeouts::fast(),
         };
         let key = crate::crypto::DpopKey::generate();
         let res = am
@@ -926,6 +985,7 @@ mod tests {
             resource_name: "Mock Resource".into(),
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            timeouts: Timeouts::fast(),
         };
 
         // This should fail after 5 retries because the port is occupied by 'listener'
@@ -964,6 +1024,7 @@ mod tests {
             resource_name: "Mock Resource".into(),
             success_html: std::sync::Arc::new(crate::templates::DEFAULT_SUCCESS_HTML.to_string()),
             failure_html: std::sync::Arc::new(crate::templates::DEFAULT_FAILURE_HTML.to_string()),
+            timeouts: Timeouts::fast(),
         };
 
         // Mock PAR response

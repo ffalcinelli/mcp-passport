@@ -40,15 +40,12 @@ async fn test_sse_piping_flow() -> anyhow::Result<()> {
     vault.store_dpop_key("sse_user", &dpop_key.to_bytes())?;
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
         auth_url_override: Some("a".into()),
         token_url_override: Some("t".into()),
         par_url_override: Some("p".into()),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
     let proxy = Proxy::new(
         "http://unused",
@@ -112,15 +109,9 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
@@ -199,15 +190,9 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy1 = Proxy::new(
@@ -305,15 +290,9 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "http://127.0.0.1:8082/callback".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
@@ -381,15 +360,9 @@ async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
@@ -441,15 +414,9 @@ async fn test_sse_401_reauth_trigger() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
@@ -479,12 +446,7 @@ async fn test_discovery_failure_handling() -> anyhow::Result<()> {
         discovery_url: Some("http://localhost:12345/invalid".into()),
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let res = AuthManager::discover(oidc_config, "res".into(), Vault::in_memory("svc"), None).await;
@@ -518,12 +480,7 @@ async fn test_discovery_missing_par_endpoint() -> anyhow::Result<()> {
         discovery_url: Some(discovery_url),
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let res = AuthManager::discover(oidc_config, "res".into(), Vault::in_memory("svc"), None).await;
@@ -549,15 +506,12 @@ async fn test_par_failure_handling() -> anyhow::Result<()> {
 
     let am = AuthManager::discover(
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "http://127.0.0.1:8081/callback".into(),
             auth_url_override: Some("a".into()),
             token_url_override: Some("t".into()),
             par_url_override: Some(par_url),
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
         "res".into(),
         Vault::in_memory("svc"),
@@ -622,15 +576,9 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "r".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
@@ -677,15 +625,9 @@ async fn test_sse_non_401_error() -> anyhow::Result<()> {
         &sse_url,
         user,
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "r".into(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
         vault.clone(),
         "2025-11-25",
@@ -732,15 +674,9 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
         &rpc_url,
         user,
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "r".into(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
         vault.clone(),
         "2025-11-25",
@@ -799,15 +735,9 @@ async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
         &rpc_url,
         user,
         OidcConfig {
-            discovery_url: None,
             client_id: "c".into(),
             redirect_url: "r".into(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            ..Default::default()
         },
         vault.clone(),
         "2025-11-25",
@@ -859,15 +789,12 @@ async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
     });
 
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "c".into(),
         redirect_url: "http://127.0.0.1:8081/callback".into(),
         auth_url_override: Some("a".into()),
         token_url_override: Some("t".into()),
         par_url_override: Some("p".into()),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     let proxy = Proxy::new(

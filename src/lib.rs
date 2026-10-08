@@ -5,7 +5,7 @@ pub mod proxy;
 pub mod templates;
 pub mod vault;
 
-use crate::auth::OidcConfig;
+use crate::auth::{OidcConfig, Timeouts};
 use crate::config::Config;
 use crate::proxy::Proxy;
 use crate::vault::Vault;
@@ -63,9 +63,12 @@ where
         auth_url_override: config.kc_auth_url.clone(),
         token_url_override: config.kc_token_url.clone(),
         par_url_override: config.kc_par_url.clone(),
-        internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
         template_dir: config.template_dir.clone(),
+        timeouts: Timeouts {
+            auth: std::time::Duration::from_secs(config.auth_timeout_secs),
+            ..Default::default()
+        },
+        ..Default::default()
     };
 
     let proxy = Proxy::new(
@@ -174,15 +177,10 @@ mod tests {
             "http://localhost",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
@@ -200,15 +198,10 @@ mod tests {
             "http://localhost",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
@@ -245,15 +238,10 @@ mod tests {
             &rpc_url,
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             vault.clone(),
             "v1",
@@ -308,6 +296,7 @@ mod tests {
             template_dir: None,
             mcp_protocol_version: "2025-11-25".into(),
             auth_scheme: AuthScheme::Bearer,
+            auth_timeout_secs: 300,
         };
 
         // Pre-populate vault to skip OIDC

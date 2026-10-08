@@ -179,15 +179,10 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
     // 4. Initialize OidcConfig with test channels
     let (url_tx, url_rx) = oneshot::channel::<String>();
     let oidc_config = OidcConfig {
-        discovery_url: None,
         client_id: "test-client".into(),
         redirect_url: "http://localhost:8082/callback".into(),
-        auth_url_override: None,
-        token_url_override: None,
-        par_url_override: None,
         internal_url_tx: Arc::new(tokio::sync::Mutex::new(Some(url_tx))),
-        internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        template_dir: None,
+        ..Default::default()
     };
 
     // 5. Initialize Proxy

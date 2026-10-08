@@ -157,8 +157,12 @@ impl Proxy {
         auth_scheme: AuthScheme,
     ) -> Arc<Self> {
         let (tx, rx) = watch::channel(false);
+        let http_client = Client::builder()
+            .connect_timeout(crate::auth::CONNECT_TIMEOUT)
+            .build()
+            .expect("Failed to build HTTP client");
         Arc::new(Self {
-            http_client: Client::new(),
+            http_client,
             remote_url: remote_url.to_string(),
             suspension_rx: rx,
             suspension_tx: tx,
@@ -517,21 +521,19 @@ impl Proxy {
             }
         };
 
-        let reauth_res = tokio::time::timeout(
-            std::time::Duration::from_secs(if cfg!(test) { 1 } else { 300 }), // 5 minute timeout for user to login
-            auth_manager.reauthenticate(&self.user_id, scopes, None),
-        )
-        .await;
-
-        match reauth_res {
-            Ok(Ok(_)) => {
+        // `reauthenticate` bounds the interactive wait with `timeouts.auth`.
+        match auth_manager
+            .reauthenticate(&self.user_id, scopes, None)
+            .await
+        {
+            Ok(()) => {
                 self.reauth_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 info!("Re-authentication successful. Deactivating Airlock...");
                 let _ = self.suspension_tx.send(false);
                 Ok(())
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 error!("Re-authentication failed: {:?}", e);
                 let _ = self.suspension_tx.send(false);
                 {
@@ -539,15 +541,6 @@ impl Proxy {
                     *last = None;
                 }
                 Err(e)
-            }
-            Err(_) => {
-                error!("Re-authentication timed out after 5 minutes.");
-                let _ = self.suspension_tx.send(false);
-                {
-                    let mut last = self.last_reauth.lock().await;
-                    *last = None;
-                }
-                anyhow::bail!("Re-authentication timed out")
             }
         }
     }
@@ -681,11 +674,12 @@ impl Proxy {
                 }
             }
 
-            warn!("SSE connection lost, retrying in 5 seconds...");
-            let base_delay = if cfg!(test) { 10 } else { 5000 };
-            let jitter_max = if cfg!(test) { 10 } else { 2000 };
-            let jitter = rand::rng().random::<u64>() % jitter_max;
-            tokio::time::sleep(std::time::Duration::from_millis(base_delay + jitter)).await;
+            let t = &self.oidc_config.timeouts;
+            let jitter_max = t.sse_retry_jitter.as_millis().max(1) as u64;
+            let delay = t.sse_retry_base
+                + std::time::Duration::from_millis(rand::rng().random::<u64>() % jitter_max);
+            warn!("SSE connection lost, retrying in {:?}...", delay);
+            tokio::time::sleep(delay).await;
         }
     }
 }
@@ -761,12 +755,8 @@ mod tests {
             discovery_url: Some("http://example.com/discovery".to_string()),
             client_id: "test_client_id".to_string(),
             redirect_url: "http://localhost:8080/callback".to_string(),
-            auth_url_override: None,
-            token_url_override: None,
-            par_url_override: None,
-            internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            template_dir: None,
+            timeouts: crate::auth::Timeouts::fast(),
+            ..Default::default()
         };
         let protocol_version = "2024-11-05";
         let auth_scheme = AuthScheme::Dpop;
@@ -996,15 +986,10 @@ mod tests {
             "http://localhost",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
@@ -1052,15 +1037,10 @@ mod tests {
             &rpc_url,
             "user_retry",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "http://127.0.0.1:8080/callback".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             vault.clone(),
             "v1",
@@ -1120,15 +1100,10 @@ mod tests {
             &rpc_url,
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             vault.clone(),
             "v1",
@@ -1150,15 +1125,13 @@ mod tests {
             "http://localhost:1/rpc",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
                 auth_url_override: Some("http://localhost:1/auth".into()),
                 token_url_override: Some("http://localhost:1/token".into()),
                 par_url_override: Some("http://localhost:1/par".into()),
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
@@ -1185,15 +1158,10 @@ mod tests {
             "http://localhost:1/rpc",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
@@ -1222,15 +1190,10 @@ mod tests {
             "http://localhost:1/rpc",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
@@ -1263,15 +1226,10 @@ mod tests {
             "http://localhost:1/rpc",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             vault.clone(),
             "v1",
@@ -1301,15 +1259,10 @@ mod tests {
             "http://localhost:1/rpc",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             vault.clone(),
             "v1",
@@ -1330,15 +1283,10 @@ mod tests {
             "http://localhost:1/rpc",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
@@ -1362,15 +1310,10 @@ mod tests {
             "http://localhost:1/rpc",
             "user",
             OidcConfig {
-                discovery_url: None,
                 client_id: "c".into(),
                 redirect_url: "r".into(),
-                auth_url_override: None,
-                token_url_override: None,
-                par_url_override: None,
-                internal_url_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                internal_callback_tx: Arc::new(tokio::sync::Mutex::new(None)),
-                template_dir: None,
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
             },
             Vault::in_memory("svc"),
             "v1",
