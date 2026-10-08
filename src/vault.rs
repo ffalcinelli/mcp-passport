@@ -19,6 +19,7 @@ enum Secret {
     Token,
     DpopKey,
     RefreshToken,
+    Meta,
 }
 
 impl Secret {
@@ -28,6 +29,7 @@ impl Secret {
             Secret::Token => "token",
             Secret::DpopKey => "dpop",
             Secret::RefreshToken => "refresh",
+            Secret::Meta => "meta",
         }
     }
 
@@ -36,6 +38,7 @@ impl Secret {
             Secret::Token => "token",
             Secret::DpopKey => "DPoP key",
             Secret::RefreshToken => "refresh token",
+            Secret::Meta => "credential metadata",
         }
     }
 }
@@ -54,6 +57,21 @@ enum Backend {
     Keyring,
     /// A process-local store. Clones of the same `Vault` share it.
     Memory(Arc<Mutex<HashMap<String, String>>>),
+}
+
+/// What the stored credentials were issued for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CredentialMeta {
+    /// Issuer of the authorization server that issued the tokens. Credentials
+    /// are never used with another authorization server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+    /// Scopes requested when the tokens were obtained.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// When the access token expires (seconds since the Unix epoch), if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 /// A secure storage abstraction for tokens and keys.
@@ -213,6 +231,31 @@ impl Vault {
     pub fn delete_refresh_token(&self, user_id: &str) -> Result<()> {
         self.delete(user_id, Secret::RefreshToken)
     }
+
+    /// Stores what the current credentials were issued for.
+    pub fn store_meta(&self, user_id: &str, meta: &CredentialMeta) -> Result<()> {
+        self.set(user_id, Secret::Meta, &serde_json::to_string(meta)?)
+    }
+
+    /// Retrieves the credential metadata. Unreadable metadata counts as none.
+    pub fn get_meta(&self, user_id: &str) -> Result<Option<CredentialMeta>> {
+        Ok(self
+            .get(user_id, Secret::Meta)?
+            .and_then(|m| serde_json::from_str(&m).ok()))
+    }
+
+    /// Deletes every credential stored for `user_id`.
+    pub fn clear(&self, user_id: &str) -> Result<()> {
+        for secret in [
+            Secret::Token,
+            Secret::DpopKey,
+            Secret::RefreshToken,
+            Secret::Meta,
+        ] {
+            self.delete(user_id, secret)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +318,30 @@ mod tests {
         vault.delete_refresh_token("u")?;
         assert_eq!(vault.get_refresh_token("u")?, None);
         assert_eq!(vault.get_token("u")?, Some("access".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_vault_meta_and_clear() -> Result<()> {
+        let vault = Vault::in_memory("svc");
+        assert_eq!(vault.get_meta("u")?, None);
+        let meta = CredentialMeta {
+            issuer: Some("https://as.example.com".into()),
+            scopes: vec!["read".into()],
+            expires_at: Some(42),
+        };
+        vault.store_meta("u", &meta)?;
+        assert_eq!(vault.get_meta("u")?, Some(meta));
+
+        vault.store_token("u", "t")?;
+        vault.store_refresh_token("u", "r")?;
+        vault.clear("u")?;
+        assert_eq!(vault.get_token("u")?, None);
+        assert_eq!(vault.get_refresh_token("u")?, None);
+        assert_eq!(vault.get_meta("u")?, None);
+
+        vault.set("u", Secret::Meta, "not json")?;
+        assert_eq!(vault.get_meta("u")?, None);
         Ok(())
     }
 

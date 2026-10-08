@@ -35,6 +35,22 @@ pub(crate) struct AuthServerMetadata {
     /// RFC 9207: the AS returns `iss` in the authorization response.
     #[serde(default)]
     pub authorization_response_iss_parameter_supported: bool,
+    /// PKCE methods; MCP clients must refuse an AS that doesn't list S256.
+    #[serde(default)]
+    pub code_challenge_methods_supported: Option<Vec<String>>,
+    #[serde(default)]
+    pub scopes_supported: Option<Vec<String>>,
+    /// The AS accepts Client ID Metadata Document URLs as `client_id`.
+    #[serde(default)]
+    pub client_id_metadata_document_supported: bool,
+}
+
+impl AuthServerMetadata {
+    pub fn supports_pkce_s256(&self) -> bool {
+        self.code_challenge_methods_supported
+            .as_ref()
+            .is_some_and(|m| m.iter().any(|m| m == "S256"))
+    }
 }
 
 /// The subset of RFC 9728 Protected Resource Metadata used by mcp-passport.
@@ -44,6 +60,7 @@ struct ResourceMetadata {
     #[serde(default)]
     authorization_servers: Vec<String>,
     resource_name: Option<String>,
+    scopes_supported: Option<Vec<String>>,
 }
 
 /// What dynamic discovery produced.
@@ -52,6 +69,8 @@ pub(crate) struct Discovered {
     pub metadata: AuthServerMetadata,
     /// `resource_name` from the protected resource metadata, if any.
     pub resource_name: Option<String>,
+    /// `scopes_supported` from the protected resource metadata, if any.
+    pub resource_scopes: Option<Vec<String>>,
 }
 
 /// Builds a well-known URI by inserting `/.well-known/<suffix>` between the host
@@ -128,11 +147,6 @@ async fn fetch_first(client: &Client, candidates: &[Url]) -> Result<(Url, Value)
     bail!("no metadata document found ({})", errors.join("; "))
 }
 
-/// Compares two identifiers, ignoring a single trailing `/`.
-fn same_identifier(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
-}
-
 /// The `resource` in the metadata must identify the server we are talking to:
 /// same origin, and a path that is a prefix of the MCP endpoint path.
 fn validate_resource_field(declared: Option<&str>, resource: &str) -> Result<()> {
@@ -164,7 +178,8 @@ async fn fetch_auth_server_metadata(client: &Client, issuer: &str) -> Result<Aut
         .with_context(|| format!("Failed to fetch metadata for authorization server {issuer}"))?;
     let metadata: AuthServerMetadata = serde_json::from_value(doc)
         .with_context(|| format!("Invalid authorization server metadata at {url}"))?;
-    if !same_identifier(&metadata.issuer, issuer) {
+    // Simple string comparison, no normalization (RFC 8414 §3.3).
+    if metadata.issuer != issuer {
         bail!(
             "Issuer mismatch: {} declares issuer '{}' but '{}' was expected (RFC 8414 §3.3)",
             url,
@@ -219,6 +234,7 @@ pub(crate) async fn discover_from_resource(
         return Ok(Discovered {
             metadata,
             resource_name: rm.resource_name,
+            resource_scopes: rm.scopes_supported,
         });
     }
 
@@ -233,6 +249,7 @@ pub(crate) async fn discover_from_resource(
         return Ok(Discovered {
             metadata,
             resource_name: rm.resource_name,
+            resource_scopes: rm.scopes_supported,
         });
     }
 
@@ -277,6 +294,7 @@ mod tests {
             "authorization_endpoint": format!("{issuer}/auth"),
             "token_endpoint": format!("{issuer}/token"),
             "pushed_authorization_request_endpoint": format!("{issuer}/par"),
+            "code_challenge_methods_supported": ["S256"],
         })
     }
 
@@ -430,6 +448,62 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("Issuer mismatch"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn test_discovery_issuer_comparison_is_exact() {
+        // A trailing slash is a different issuer (no normalization allowed).
+        let app = Router::new()
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(|headers: axum::http::HeaderMap| async move {
+                    let host = headers["host"].to_str().unwrap().to_string();
+                    Json(json!({ "authorization_servers": [format!("http://{host}")] }))
+                }),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(|headers: axum::http::HeaderMap| async move {
+                    let host = headers["host"].to_str().unwrap().to_string();
+                    Json(as_doc(&format!("http://{host}/")))
+                }),
+            );
+        let base = serve(app).await;
+        let err = discover_from_resource(&Client::new(), &base, None, false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("Issuer mismatch"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn test_discovery_keeps_resource_scopes() {
+        let app = Router::new()
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(|headers: axum::http::HeaderMap| async move {
+                    let host = headers["host"].to_str().unwrap().to_string();
+                    Json(json!({
+                        "authorization_servers": [format!("http://{host}")],
+                        "scopes_supported": ["mcp:read", "mcp:write"]
+                    }))
+                }),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                get(|headers: axum::http::HeaderMap| async move {
+                    let host = headers["host"].to_str().unwrap().to_string();
+                    Json(as_doc(&format!("http://{host}")))
+                }),
+            );
+        let base = serve(app).await;
+        let found = discover_from_resource(&Client::new(), &base, None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            found.resource_scopes,
+            Some(vec!["mcp:read".to_string(), "mcp:write".to_string()])
+        );
+        assert!(found.metadata.supports_pkce_s256());
     }
 
     #[tokio::test]

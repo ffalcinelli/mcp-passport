@@ -795,6 +795,7 @@ impl Proxy {
         // `reauthenticate` bounds the interactive wait with `timeouts.auth`.
         let result = async {
             let auth_manager = self.ensure_auth_manager(metadata_url).await?;
+            auth_manager.enforce_issuer_binding(&self.user_id)?;
             if allow_refresh && auth_manager.refresh(&self.user_id).await? {
                 return Ok(true);
             }

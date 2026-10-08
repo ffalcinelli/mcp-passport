@@ -106,7 +106,8 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
                     "organization_name": "Mock OIDC Provider",
                     "authorization_endpoint": format!("{}/auth", base),
                     "token_endpoint": format!("{}/token", base),
-                    "pushed_authorization_request_endpoint": format!("{}/par", base)
+                    "pushed_authorization_request_endpoint": format!("{}/par", base),
+                    "code_challenge_methods_supported": ["S256"]
                 }))
             }
         }))

@@ -12,7 +12,7 @@
 use crate::crypto::DpopKey;
 use crate::discovery;
 use crate::net;
-use crate::vault::Vault;
+use crate::vault::{CredentialMeta, Vault};
 use crate::Result;
 use anyhow::Context;
 use axum::{
@@ -58,6 +58,9 @@ pub struct OidcConfig {
     pub timeouts: Timeouts,
     /// Accept plain-HTTP authorization server endpoints on non-loopback hosts.
     pub allow_insecure_http: bool,
+    /// The issuer the (pre-registered) client belongs to. Discovery must find
+    /// exactly this authorization server.
+    pub expected_issuer: Option<String>,
 }
 
 impl Default for OidcConfig {
@@ -74,6 +77,7 @@ impl Default for OidcConfig {
             template_dir: None,
             timeouts: Timeouts::default(),
             allow_insecure_http: false,
+            expected_issuer: None,
         }
     }
 }
@@ -128,6 +132,7 @@ impl std::fmt::Debug for OidcConfig {
             .field("template_dir", &self.template_dir)
             .field("timeouts", &self.timeouts)
             .field("allow_insecure_http", &self.allow_insecure_http)
+            .field("expected_issuer", &self.expected_issuer)
             .finish()
     }
 }
@@ -171,6 +176,10 @@ pub struct AuthManager {
     iss_required: bool,
     /// Latest DPoP nonce provided by the authorization server (RFC 9449 §8).
     as_nonce: Arc<std::sync::Mutex<Option<String>>>,
+    /// `scopes_supported` of the authorization server.
+    as_scopes: Option<Vec<String>>,
+    /// `scopes_supported` of the protected resource (RFC 9728).
+    resource_scopes: Option<Vec<String>>,
 }
 
 /// Query parameters of the authorization response (RFC 6749 §4.1.2, RFC 9207).
@@ -194,6 +203,7 @@ struct TokenResponse {
     access_token: String,
     token_type: Option<String>,
     refresh_token: Option<String>,
+    expires_in: Option<u64>,
 }
 
 impl AuthManager {
@@ -219,13 +229,13 @@ impl AuthManager {
 
         // Precedence: explicit endpoint overrides, then an explicitly configured
         // discovery URL, then dynamic discovery from the resource (RFC 9728).
-        let (metadata, mut resource_name) = if overrides_complete {
-            (None, None)
+        let (metadata, mut resource_name, resource_scopes) = if overrides_complete {
+            (None, None, None)
         } else if let Some(url) = oidc_config.discovery_url.as_deref() {
             info!("Using configured OIDC discovery URL {}", url);
             net::require_secure_url(url, "OIDC discovery URL", oidc_config.allow_insecure_http)?;
             let metadata = discovery::fetch_configured_metadata(&http_client, url).await?;
-            (Some(metadata), None)
+            (Some(metadata), None, None)
         } else {
             info!("Discovering the authorization server for {}...", resource);
             let found = discovery::discover_from_resource(
@@ -235,8 +245,44 @@ impl AuthManager {
                 oidc_config.allow_insecure_http,
             )
             .await?;
-            (Some(found.metadata), found.resource_name)
+            (
+                Some(found.metadata),
+                found.resource_name,
+                found.resource_scopes,
+            )
         };
+
+        if let Some(m) = &metadata {
+            if let Some(expected) = &oidc_config.expected_issuer {
+                if &m.issuer != expected {
+                    anyhow::bail!(
+                        "The authorization server '{}' is not the one this client is registered \
+                         with (--oidc-issuer '{}')",
+                        m.issuer,
+                        expected
+                    );
+                }
+            }
+            // MCP clients must confirm PKCE support before starting a flow.
+            if !m.supports_pkce_s256() {
+                anyhow::bail!(
+                    "Authorization server '{}' does not advertise PKCE S256 in \
+                     code_challenge_methods_supported; refusing to proceed",
+                    m.issuer
+                );
+            }
+            if is_url_client_id(&oidc_config.client_id) && !m.client_id_metadata_document_supported
+            {
+                warn!(
+                    "Client ID '{}' is a metadata document URL, but '{}' does not advertise \
+                     client_id_metadata_document_supported.",
+                    oidc_config.client_id, m.issuer
+                );
+            }
+        }
+        if is_url_client_id(&oidc_config.client_id) {
+            check_cimd_client_id(&oidc_config.client_id)?;
+        }
 
         let auth_url = oidc_config
             .auth_url_override
@@ -268,7 +314,11 @@ impl AuthManager {
             net::require_secure_url(url, what, oidc_config.allow_insecure_http)?;
         }
 
-        let issuer = metadata.as_ref().map(|m| m.issuer.clone());
+        let issuer = metadata
+            .as_ref()
+            .map(|m| m.issuer.clone())
+            .or_else(|| oidc_config.expected_issuer.clone());
+        let as_scopes = metadata.as_ref().and_then(|m| m.scopes_supported.clone());
         let iss_required = metadata
             .as_ref()
             .is_some_and(|m| m.authorization_response_iss_parameter_supported);
@@ -316,6 +366,8 @@ impl AuthManager {
             issuer,
             iss_required,
             as_nonce: Arc::default(),
+            as_scopes,
+            resource_scopes,
         })
     }
 
@@ -355,8 +407,13 @@ impl AuthManager {
         let (server_handle, rx) = self.setup_loopback_server(expected_state).await?;
 
         // 4. Pushed Authorization Request (PAR)
+        let previous = self
+            .bound_meta(user_id)?
+            .map(|m| m.scopes)
+            .unwrap_or_default();
+        let scopes = self.select_scopes(scopes, &previous);
         let par_data = self
-            .perform_par_request(&pkce_challenge, &state_val, scopes, &server_handle)
+            .perform_par_request(&pkce_challenge, &state_val, &scopes, &server_handle)
             .await?;
 
         // 5. Direct user to Auth URL
@@ -376,7 +433,7 @@ impl AuthManager {
 
         // 7. Token Exchange with DPoP
         info!("Step 2: Exchanging code for DPoP-bound token...");
-        self.manual_token_exchange(user_id, &code, &pkce_verifier, &dpop_key)
+        self.manual_token_exchange(user_id, &code, &pkce_verifier, &dpop_key, &scopes)
             .await?;
 
         Ok(())
@@ -458,7 +515,7 @@ impl AuthManager {
         &self,
         pkce_challenge: &str,
         state_val: &str,
-        scopes: Option<Vec<String>>,
+        scopes: &[String],
         server_handle: &tokio::task::JoinHandle<()>,
     ) -> Result<ParResponse> {
         info!("Step 1: Pushed Authorization Request (PAR)...");
@@ -472,12 +529,10 @@ impl AuthManager {
             ("resource", self.resource.as_str()),
         ];
 
-        let mut s_vec = scopes.unwrap_or_default();
-        if !s_vec.iter().any(|s| s == "openid") {
-            s_vec.push("openid".to_string());
+        let scope_str = scopes.join(" ");
+        if !scope_str.is_empty() {
+            par_params.push(("scope", &scope_str));
         }
-        let scope_str = s_vec.join(" ");
-        par_params.push(("scope", &scope_str));
 
         let par_res = self
             .http_client
@@ -567,6 +622,7 @@ impl AuthManager {
         code: &str,
         pkce_verifier: &str,
         dpop_key: &DpopKey,
+        scopes: &[String],
     ) -> Result<()> {
         let params = [
             ("grant_type", "authorization_code"),
@@ -582,7 +638,7 @@ impl AuthManager {
             .map_err(|err| anyhow::anyhow!("Token exchange failed: {}", err))?;
 
         self.vault.store_dpop_key(user_id, &dpop_key.to_bytes())?;
-        self.store_tokens(user_id, &tokens)?;
+        self.store_tokens(user_id, &tokens, Some(scopes))?;
         if tokens.refresh_token.is_none() {
             // A refresh token we still hold is bound to the previous key.
             self.vault.delete_refresh_token(user_id)?;
@@ -601,6 +657,11 @@ impl AuthManager {
         let Some(refresh_token) = self.vault.get_refresh_token(user_id)? else {
             return Ok(false);
         };
+        // Never send a refresh token to an authorization server that didn't issue it.
+        if self.vault.get_meta(user_id)?.is_some() && self.bound_meta(user_id)?.is_none() {
+            self.vault.delete_refresh_token(user_id)?;
+            return Ok(false);
+        }
         // Refresh tokens of public clients are bound to the DPoP key (RFC 9449 §5).
         let Some(key_bytes) = self.vault.get_dpop_key(user_id)? else {
             self.vault.delete_refresh_token(user_id)?;
@@ -617,7 +678,7 @@ impl AuthManager {
         ];
         match self.token_request(&params, &dpop_key).await? {
             Ok(tokens) => {
-                self.store_tokens(user_id, &tokens)?;
+                self.store_tokens(user_id, &tokens, None)?;
                 info!("Access token refreshed.");
                 Ok(true)
             }
@@ -694,13 +755,96 @@ impl AuthManager {
         Ok(Ok(tokens))
     }
 
-    fn store_tokens(&self, user_id: &str, tokens: &TokenResponse) -> Result<()> {
+    /// Stores the tokens and what they were issued for. `scopes` is `None` for
+    /// a refresh, which keeps the previously requested scopes.
+    fn store_tokens(
+        &self,
+        user_id: &str,
+        tokens: &TokenResponse,
+        scopes: Option<&[String]>,
+    ) -> Result<()> {
         self.vault.store_token(user_id, &tokens.access_token)?;
         // A refresh response without refresh_token keeps the current one (RFC 6749 §6).
         if let Some(refresh) = &tokens.refresh_token {
             self.vault.store_refresh_token(user_id, refresh)?;
         }
+        let scopes = match scopes {
+            Some(s) => s.to_vec(),
+            None => self
+                .vault
+                .get_meta(user_id)?
+                .map(|m| m.scopes)
+                .unwrap_or_default(),
+        };
+        let expires_at = tokens.expires_in.map(|secs| unix_now() + secs);
+        self.vault.store_meta(
+            user_id,
+            &CredentialMeta {
+                issuer: self.issuer.clone(),
+                scopes,
+                expires_at,
+            },
+        )
+    }
+
+    /// The stored credential metadata, if the credentials come from this
+    /// authorization server (or their issuer is unknown).
+    fn bound_meta(&self, user_id: &str) -> Result<Option<CredentialMeta>> {
+        Ok(self
+            .vault
+            .get_meta(user_id)?
+            .filter(|meta| match (&meta.issuer, &self.issuer) {
+                (Some(stored), Some(current)) => stored == current,
+                _ => true,
+            }))
+    }
+
+    /// Discards stored credentials issued by a different authorization server
+    /// than the one discovered now. Credentials are bound to their issuer.
+    pub fn enforce_issuer_binding(&self, user_id: &str) -> Result<()> {
+        let Some(meta) = self.vault.get_meta(user_id)? else {
+            return Ok(());
+        };
+        if self.bound_meta(user_id)?.is_none() {
+            warn!(
+                "Stored credentials were issued by '{}', but the server now uses '{}'; \
+                 discarding them.",
+                meta.issuer.as_deref().unwrap_or_default(),
+                self.issuer.as_deref().unwrap_or_default()
+            );
+            self.vault.clear(user_id)?;
+        }
         Ok(())
+    }
+
+    /// Scopes for a new authorization request (MCP scope selection strategy):
+    /// the challenged scopes, else the resource's `scopes_supported`, plus the
+    /// previously requested ones (step-up keeps earlier permissions). `openid`
+    /// and `offline_access` are added when the authorization server offers them.
+    fn select_scopes(&self, challenged: Option<Vec<String>>, previous: &[String]) -> Vec<String> {
+        let mut scopes: Vec<String> = previous.to_vec();
+        let wanted = challenged
+            .or_else(|| self.resource_scopes.clone())
+            .unwrap_or_default();
+        let offered = |s: &str| {
+            self.as_scopes
+                .as_ref()
+                .is_some_and(|supported| supported.iter().any(|x| x == s))
+        };
+        let mut extra = Vec::new();
+        // `openid` keeps working with providers that don't list their scopes.
+        if self.as_scopes.is_none() || offered("openid") {
+            extra.push("openid".to_string());
+        }
+        if offered("offline_access") {
+            extra.push("offline_access".to_string());
+        }
+        for s in wanted.into_iter().chain(extra) {
+            if !scopes.contains(&s) {
+                scopes.push(s);
+            }
+        }
+        scopes
     }
 
     /// Retrieves the current access token for a user from the vault.
@@ -831,6 +975,32 @@ fn build_authorize_url(auth_endpoint: &str, client_id: &str, request_uri: &str) 
     Ok(url.into())
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// Whether the client id looks like a URL (a Client ID Metadata Document).
+fn is_url_client_id(client_id: &str) -> bool {
+    client_id.starts_with("https://") || client_id.starts_with("http://")
+}
+
+/// A Client ID Metadata Document URL must be https and have a path.
+fn check_cimd_client_id(client_id: &str) -> Result<()> {
+    let url = url::Url::parse(client_id)
+        .with_context(|| format!("Invalid client ID metadata document URL '{client_id}'"))?;
+    if url.scheme() != "https" || url.path().trim_matches('/').is_empty() {
+        anyhow::bail!(
+            "Client ID '{}' must be an https URL with a path to be used as a Client ID \
+             Metadata Document",
+            client_id
+        );
+    }
+    Ok(())
+}
+
 /// Returns `len` bytes from the OS CSPRNG, base64url-encoded without padding.
 fn random_urlsafe(len: usize) -> String {
     let mut buf = vec![0u8; len];
@@ -918,6 +1088,8 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
 
         let (tx, _rx) = oneshot::channel::<SocketAddr>();
@@ -1234,6 +1406,8 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
         let err = am.reauthenticate("user", None, None).await.unwrap_err();
         assert!(err.to_string().contains("RFC 8252"), "{err}");
@@ -1264,6 +1438,8 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
         assert!(am.reauthenticate("user", None, None).await.is_err());
         assert_eq!(vault.get_dpop_key("user").unwrap(), Some(vec![7u8; 32]));
@@ -1329,6 +1505,8 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
 
         let (tx, _rx) = oneshot::channel::<String>();
@@ -1359,6 +1537,8 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
         am.vault.store_token("user", "token")?;
 
@@ -1389,7 +1569,8 @@ mod tests {
                     "issuer": "https://configured.example.com",
                     "authorization_endpoint": "https://configured.example.com/auth",
                     "token_endpoint": "https://configured.example.com/token",
-                    "pushed_authorization_request_endpoint": "https://configured.example.com/par"
+                    "pushed_authorization_request_endpoint": "https://configured.example.com/par",
+                    "code_challenge_methods_supported": ["S256"]
                 }))
             }),
         );
@@ -1416,6 +1597,181 @@ mod tests {
         .await?;
         assert_eq!(am.token_url, "https://configured.example.com/token");
         assert_eq!(am.par_url, "https://configured.example.com/par");
+        Ok(())
+    }
+
+    /// Serves `doc` as a configured discovery document and runs `discover`.
+    async fn discover_with(doc: serde_json::Value, config: OidcConfig) -> Result<AuthManager> {
+        let app = Router::new().route(
+            "/oidc",
+            get(move || {
+                let doc = doc.clone();
+                async move { axum::Json(doc) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        AuthManager::discover(
+            OidcConfig {
+                discovery_url: Some(format!("{base}/oidc")),
+                client_id: "c".into(),
+                redirect_url: "http://127.0.0.1:1/callback".into(),
+                ..config
+            },
+            format!("{base}/rpc"),
+            Vault::in_memory("svc"),
+            None,
+        )
+        .await
+    }
+
+    fn as_metadata(extra: serde_json::Value) -> serde_json::Value {
+        let mut doc = serde_json::json!({
+            "issuer": "https://as.example.com",
+            "authorization_endpoint": "https://as.example.com/auth",
+            "token_endpoint": "https://as.example.com/token",
+            "pushed_authorization_request_endpoint": "https://as.example.com/par",
+            "code_challenge_methods_supported": ["S256"]
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            doc[k] = v.clone();
+        }
+        doc
+    }
+
+    #[tokio::test]
+    async fn test_discover_requires_pkce_s256() {
+        for methods in [serde_json::Value::Null, serde_json::json!(["plain"])] {
+            let doc = as_metadata(serde_json::json!({"code_challenge_methods_supported": methods}));
+            let err = discover_with(doc, OidcConfig::default())
+                .await
+                .err()
+                .unwrap();
+            assert!(err.to_string().contains("PKCE S256"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_checks_expected_issuer() -> Result<()> {
+        let pinned = |issuer: &str| OidcConfig {
+            expected_issuer: Some(issuer.into()),
+            ..Default::default()
+        };
+        let err = discover_with(
+            as_metadata(serde_json::json!({})),
+            pinned("https://other.example.com"),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("--oidc-issuer"), "{err}");
+        let am = discover_with(
+            as_metadata(serde_json::json!({})),
+            pinned("https://as.example.com"),
+        )
+        .await?;
+        assert_eq!(am.issuer.as_deref(), Some("https://as.example.com"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_discover_rejects_invalid_cimd_client_id() {
+        let res = AuthManager::discover(
+            OidcConfig {
+                client_id: "http://client.example.com/meta.json".into(),
+                redirect_url: "http://127.0.0.1:1/callback".into(),
+                auth_url_override: Some("https://as/auth".into()),
+                token_url_override: Some("https://as/token".into()),
+                par_url_override: Some("https://as/par".into()),
+                ..Default::default()
+            },
+            "http://127.0.0.1:1/rpc".into(),
+            Vault::in_memory("svc"),
+            None,
+        )
+        .await;
+        assert!(res
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("https URL with a path"));
+        assert!(check_cimd_client_id("https://client.example.com/oauth/meta.json").is_ok());
+        assert!(check_cimd_client_id("https://client.example.com/").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_select_scopes() -> Result<()> {
+        let mut am = discover_with(
+            as_metadata(
+                serde_json::json!({"scopes_supported": ["openid", "offline_access", "mcp:read"]}),
+            ),
+            OidcConfig::default(),
+        )
+        .await?;
+        let v = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+
+        // Challenge scopes win; openid and offline_access are offered by the AS.
+        assert_eq!(
+            am.select_scopes(Some(v(&["files:read"])), &[]),
+            v(&["files:read", "openid", "offline_access"])
+        );
+        // Step-up keeps what was requested before.
+        assert_eq!(
+            am.select_scopes(Some(v(&["files:write"])), &v(&["files:read", "openid"])),
+            v(&["files:read", "openid", "files:write", "offline_access"])
+        );
+        // Without a challenge: the resource's scopes_supported.
+        am.resource_scopes = Some(v(&["mcp:read"]));
+        assert_eq!(
+            am.select_scopes(None, &[]),
+            v(&["mcp:read", "openid", "offline_access"])
+        );
+        // An AS that lists scopes without openid doesn't get it.
+        am.as_scopes = Some(v(&["mcp:read"]));
+        assert_eq!(am.select_scopes(None, &[]), v(&["mcp:read"]));
+        // An AS that lists no scopes keeps the historical openid.
+        am.as_scopes = None;
+        am.resource_scopes = None;
+        assert_eq!(am.select_scopes(None, &[]), v(&["openid"]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_issuer_binding() -> Result<()> {
+        let am = discover_with(as_metadata(serde_json::json!({})), OidcConfig::default()).await?;
+        let other = CredentialMeta {
+            issuer: Some("https://previous-as.example.com".into()),
+            ..Default::default()
+        };
+
+        // Credentials from another AS are discarded.
+        am.vault.store_token("u", "t")?;
+        am.vault.store_refresh_token("u", "r")?;
+        am.vault.store_meta("u", &other)?;
+        am.enforce_issuer_binding("u")?;
+        assert_eq!(am.vault.get_token("u")?, None);
+        assert_eq!(am.vault.get_refresh_token("u")?, None);
+
+        // ...and their refresh token is never sent anywhere.
+        am.vault.store_refresh_token("u", "r")?;
+        am.vault.store_meta("u", &other)?;
+        assert!(!am.refresh("u").await?);
+        assert_eq!(am.vault.get_refresh_token("u")?, None);
+
+        // Credentials from this AS, or without metadata, are kept.
+        am.vault.store_token("u", "t")?;
+        am.vault.store_meta(
+            "u",
+            &CredentialMeta {
+                issuer: Some("https://as.example.com".into()),
+                ..Default::default()
+            },
+        )?;
+        am.enforce_issuer_binding("u")?;
+        assert_eq!(am.vault.get_token("u")?, Some("t".into()));
         Ok(())
     }
 
@@ -1462,10 +1818,12 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
         let key = crate::crypto::DpopKey::generate();
         let res = am
-            .manual_token_exchange("user", "code", "verifier", &key)
+            .manual_token_exchange("user", "code", "verifier", &key, &[])
             .await;
         assert!(res.is_err());
         Ok(())
@@ -1495,6 +1853,8 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
 
         // This should fail after 5 retries because the port is occupied by 'listener'
@@ -1537,6 +1897,8 @@ mod tests {
             issuer: None,
             iss_required: false,
             as_nonce: Arc::default(),
+            as_scopes: None,
+            resource_scopes: None,
         };
 
         // Mock PAR response

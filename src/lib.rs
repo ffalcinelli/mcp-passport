@@ -42,6 +42,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
     let optional = [
         (&config.remote_sse_url, "--remote-sse-url"),
         (&config.oidc_discovery_url, "--oidc-discovery-url"),
+        (&config.oidc_issuer, "--oidc-issuer"),
         (&config.kc_auth_url, "--kc-auth-url"),
         (&config.kc_token_url, "--kc-token-url"),
         (&config.kc_par_url, "--kc-par-url"),
@@ -93,6 +94,7 @@ where
         par_url_override: config.kc_par_url.clone(),
         template_dir: config.template_dir.clone(),
         allow_insecure_http: config.allow_insecure_http,
+        expected_issuer: config.oidc_issuer.clone(),
         timeouts: Timeouts {
             auth: std::time::Duration::from_secs(config.auth_timeout_secs),
             ..Default::default()
@@ -678,6 +680,7 @@ mod tests {
             log_level: "info".into(),
             log_dir: None,
             allow_insecure_http: false,
+            oidc_issuer: None,
             template_dir: None,
             mcp_protocol_version: "2025-11-25".into(),
             auth_scheme: AuthScheme::Bearer,

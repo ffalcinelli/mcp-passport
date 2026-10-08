@@ -77,7 +77,15 @@ pub struct Config {
     )]
     pub kc_par_url: Option<String>,
 
-    /// OIDC Client ID
+    /// Expected issuer of the authorization server the client ID is registered with
+    #[arg(
+        long,
+        env = "MCP_PASSPORT_OIDC_ISSUER",
+        help_heading = "OIDC Configuration"
+    )]
+    pub oidc_issuer: Option<String>,
+
+    /// OIDC Client ID (a pre-registered ID, or an https URL of a Client ID Metadata Document)
     #[arg(
         long,
         env = "MCP_PASSPORT_OIDC_CLIENT_ID",

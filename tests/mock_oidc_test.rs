@@ -275,7 +275,8 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
                             "issuer": "http://localhost",
                             "authorization_endpoint": "http://localhost/auth",
                             "token_endpoint": "http://localhost/token",
-                            "pushed_authorization_request_endpoint": "http://localhost/par"
+                            "pushed_authorization_request_endpoint": "http://localhost/par",
+                            "code_challenge_methods_supported": ["S256"]
                         }))
                     }
                 }
@@ -566,7 +567,8 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
                     "issuer": "http://localhost",
                     "authorization_endpoint": "http://localhost/auth",
                     "token_endpoint": "http://localhost/token",
-                    "pushed_authorization_request_endpoint": "http://localhost/par"
+                    "pushed_authorization_request_endpoint": "http://localhost/par",
+                            "code_challenge_methods_supported": ["S256"]
                 }))
             }),
         );
