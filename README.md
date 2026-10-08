@@ -20,7 +20,7 @@
 - **Silent Refresh**: Expired tokens are renewed with the DPoP-bound refresh token, so the browser only opens when a new login is really needed.
 - **DPoP Nonces**: Server-provided nonces (RFC 9449 §8/§9) from both the authorization server and the MCP server are handled transparently.
 - **RFC 8707 Resource Indicators**: Explicitly identifies target MCP servers in OIDC requests to prevent token misuse across different resources.
-- **Secure OS Vault Integration**: Leverages the system's native secure storage (macOS Keychain, Windows Credential Manager, Linux Secret Service) via `keyring`.
+- **Secure OS Vault Integration**: Leverages the system's native secure storage via `keyring`: macOS Keychain, Windows Credential Manager, and on Linux the kernel keyring as a cache in front of the Secret Service (GNOME Keyring, KWallet), so credentials survive reboots. Headless Linux without a Secret Service can use `MCP_PASSPORT_USE_MEMORY_VAULT=1` (credentials kept in memory for the process lifetime only).
 - **SSE Support**: Handles persistent Server-Sent Events (SSE) from the remote server, piping them back to the AI client.
 
 ## 🏗️ Architecture: The Bridge

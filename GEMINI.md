@@ -8,7 +8,7 @@ The project is built on five core architectural pillars:
 2. **MCP Spec Compliance (2025-11-25)**: Full implementation of the MCP authorization specification, including dynamic discovery via `WWW-Authenticate` and RFC 8707 Resource Indicators.
 3. **The "Airlock" State Machine**: Non-destructive interception of 401 (expiration) and 403 (insufficient scope) challenges, suspending the request stream using `tokio::sync::watch` while triggering transparent OIDC flows.
 4. **FAPI 2.0 Security**: Financial-grade security implementing **Pushed Authorization Requests (PAR)**, **PKCE**, and **DPoP (Demonstrating Proof-of-Possession)** to cryptographically bind tokens to ephemeral keys.
-5. **OS-Native Vault**: Secure storage of sensitive tokens and DPoP keys using the system's native keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) via the `keyring` crate.
+5. **OS-Native Vault**: Secure storage of sensitive tokens and DPoP keys using the system's native keychain (macOS Keychain, Windows Credential Manager, Linux keyutils backed by the Secret Service) via the `keyring` crate. All three native backends must stay enabled in `Cargo.toml`: without a backend feature keyring silently uses a non-persistent mock store.
 
 ## Implementation Details
 - **Lazy Auth Flow**: `AuthManager` is initialized lazily upon discovering the authorization server's metadata from the remote MCP server.

@@ -1,7 +1,9 @@
 //! # OS-Native Secure Vault
 //!
-//! This module provides an abstraction over the system's native secure storage
-//! (macOS Keychain, Windows Credential Manager, Linux Secret Service) via the `keyring` crate.
+//! This module provides an abstraction over the system's native secure storage via the
+//! `keyring` crate: macOS Keychain, Windows Credential Manager, and on Linux the kernel
+//! keyring (keyutils) as a cache in front of the Secret Service, which persists across
+//! reboots.
 //!
 //! It also includes an in-memory backend for headless or testing environments.
 
@@ -37,6 +39,14 @@ impl Secret {
         }
     }
 }
+
+/// Extra guidance for keychain failures on Linux, where storage needs a
+/// running Secret Service.
+#[cfg(target_os = "linux")]
+const KEYCHAIN_HINT: &str = " (on Linux this needs a running Secret Service such as GNOME \
+    Keyring or KWallet; MCP_PASSPORT_USE_MEMORY_VAULT=1 keeps credentials in memory only)";
+#[cfg(not(target_os = "linux"))]
+const KEYCHAIN_HINT: &str = "";
 
 #[derive(Clone)]
 enum Backend {
@@ -116,7 +126,13 @@ impl Vault {
             Backend::Keyring => self
                 .keyring_entry(user_id, secret)?
                 .set_password(value)
-                .with_context(|| format!("Failed to store {} in vault", secret.label())),
+                .with_context(|| {
+                    format!(
+                        "Failed to store {} in the OS keychain{}",
+                        secret.label(),
+                        KEYCHAIN_HINT
+                    )
+                }),
         }
     }
 
@@ -313,6 +329,35 @@ mod tests {
         a.store_token("user", "token-a")?;
         assert_eq!(a2.get_token("user")?, Some("token-a".into()));
         assert_eq!(b.get_token("user")?, None);
+        Ok(())
+    }
+
+    /// Needs a real OS keychain (on Linux: a running Secret Service).
+    /// Run with `cargo test --lib keyring_roundtrip -- --ignored`.
+    #[test]
+    #[ignore]
+    fn test_keyring_roundtrip_persists_across_instances() -> Result<()> {
+        let service = format!("mcp-passport-roundtrip-{}", uuid::Uuid::new_v4());
+        let writer = Vault::keyring(&service);
+        writer.store_token("u", "token-123")?;
+        writer.store_dpop_key("u", &[1, 2, 3])?;
+        writer.store_refresh_token("u", "refresh-456")?;
+
+        // A different instance must see what the first one stored.
+        let reader = Vault::keyring(&service);
+        let result = (
+            reader.get_token("u"),
+            reader.get_dpop_key("u"),
+            reader.get_refresh_token("u"),
+        );
+        reader.delete_token("u")?;
+        reader.delete_dpop_key("u")?;
+        reader.delete_refresh_token("u")?;
+
+        assert_eq!(result.0?, Some("token-123".into()));
+        assert_eq!(result.1?, Some(vec![1, 2, 3]));
+        assert_eq!(result.2?, Some("refresh-456".into()));
+        assert_eq!(reader.get_token("u")?, None);
         Ok(())
     }
 

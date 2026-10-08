@@ -85,7 +85,7 @@ Use `MCP_PASSPORT_LOG_LEVEL=debug` for more detail.
 ### Vault Issues
 If authentication keeps failing, you can clear the stored tokens from your system's keychain. Each MCP server has its own entries, named `mcp-passport:<id>` (access token), `mcp-passport:<id>-dpop` (DPoP key) and `mcp-passport:<id>-refresh` (refresh token).
 - **macOS**: Use "Keychain Access" and search for `mcp-passport`.
-- **Linux**: Use `secret-tool lookup service mcp-passport` or similar.
+- **Linux**: Use `secret-tool search --all service mcp-passport:<id>` (or Seahorse / KWallet Manager). Entries are also cached in the kernel keyring for the session.
 - **Windows**: Use "Credential Manager".
 
 ### Loopback Port Collision

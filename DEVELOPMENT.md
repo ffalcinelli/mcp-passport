@@ -26,7 +26,7 @@ To handle authentication without breaking the AI client's connection, we use a s
 We use the `keyring` crate to interface with:
 - **macOS**: Keychain
 - **Windows**: Credential Manager
-- **Linux**: Secret Service (libsecret) or KWallet.
+- **Linux**: Secret Service (GNOME Keyring or KWallet), with the kernel keyring (keyutils) as a cache. libdbus is built from source (`vendored`), so only a C compiler is needed.
 
 ## 🚀 Development Setup
 
