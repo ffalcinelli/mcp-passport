@@ -1,3 +1,5 @@
+mod common;
+
 use anyhow::Context;
 use ax_extract::Form;
 use axum::http::{HeaderMap, StatusCode};
@@ -15,7 +17,6 @@ use mcp_passport::vault::Vault;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -78,21 +79,8 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
         .try_init();
 
     // 1. Start Chromedriver
-    let chromedriver_img = GenericImage::new("selenium/standalone-chrome", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Started Selenium Standalone"))
-        .with_network("host");
-    let _chromedriver_container = chromedriver_img
-        .start()
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to start Chromedriver container. Is Docker running and accessible? \
-                 If you are using a non-standard socket, try setting DOCKER_HOST (e.g., DOCKER_HOST=unix:///var/run/docker.sock). \
-                 Error: {:?}",
-                e
-            )
-        })?;
-    let chrome_url = "http://localhost:4444";
+    let _chromedriver_container = common::start_chrome().await?;
+    let chrome_url = common::CHROME_URL;
 
     // 2. Setup Mock OIDC Server with UI and session tracking
     let (state_tx, mut _state_rx) = mpsc::channel::<String>(1);
