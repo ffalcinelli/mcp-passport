@@ -186,6 +186,14 @@ struct ParResponse {
     request_uri: String,
 }
 
+/// Successful token endpoint response (RFC 6749 §5.1).
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: Option<String>,
+    refresh_token: Option<String>,
+}
+
 impl AuthManager {
     /// Resolves the authorization server endpoints for `resource`.
     ///
@@ -548,6 +556,8 @@ impl AuthManager {
         Ok(())
     }
 
+    /// Exchanges the authorization code for a DPoP-bound token and stores it,
+    /// together with its key and refresh token.
     async fn manual_token_exchange(
         &self,
         user_id: &str,
@@ -555,9 +565,7 @@ impl AuthManager {
         pkce_verifier: &str,
         dpop_key: &DpopKey,
     ) -> Result<()> {
-        let dpop_proof = dpop_key.generate_proof("POST", &self.token_url)?;
-
-        let params = vec![
+        let params = [
             ("grant_type", "authorization_code"),
             ("client_id", self.client_id.as_str()),
             ("code", code),
@@ -565,29 +573,84 @@ impl AuthManager {
             ("code_verifier", pkce_verifier),
             ("resource", self.resource.as_str()),
         ];
+        let tokens = self
+            .token_request(&params, dpop_key)
+            .await?
+            .map_err(|err| anyhow::anyhow!("Token exchange failed: {}", err))?;
 
+        self.vault.store_dpop_key(user_id, &dpop_key.to_bytes())?;
+        self.store_tokens(user_id, &tokens)?;
+        if tokens.refresh_token.is_none() {
+            // A refresh token we still hold is bound to the previous key.
+            self.vault.delete_refresh_token(user_id)?;
+        }
+        info!("Successfully acquired and stored DPoP-bound token.");
+        Ok(())
+    }
+
+    /// Renews the access token with the stored refresh token (RFC 6749 §6),
+    /// without user interaction.
+    ///
+    /// Returns `Ok(false)` when there is nothing to refresh with or the
+    /// authorization server rejects the refresh token (which is then deleted),
+    /// so the caller can fall back to the interactive flow.
+    pub async fn refresh(&self, user_id: &str) -> Result<bool> {
+        let Some(refresh_token) = self.vault.get_refresh_token(user_id)? else {
+            return Ok(false);
+        };
+        // Refresh tokens of public clients are bound to the DPoP key (RFC 9449 §5).
+        let Some(key_bytes) = self.vault.get_dpop_key(user_id)? else {
+            self.vault.delete_refresh_token(user_id)?;
+            return Ok(false);
+        };
+        let dpop_key = DpopKey::from_bytes(&key_bytes)?;
+
+        info!("Refreshing the access token...");
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("client_id", self.client_id.as_str()),
+            ("refresh_token", refresh_token.as_str()),
+            ("resource", self.resource.as_str()),
+        ];
+        match self.token_request(&params, &dpop_key).await? {
+            Ok(tokens) => {
+                self.store_tokens(user_id, &tokens)?;
+                info!("Access token refreshed.");
+                Ok(true)
+            }
+            Err(err) => {
+                warn!("Refresh token rejected ({}); a new login is needed.", err);
+                self.vault.delete_refresh_token(user_id)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// POSTs to the token endpoint with a DPoP proof. The outer error is a
+    /// transport failure; the inner one is the endpoint's error response.
+    async fn token_request(
+        &self,
+        params: &[(&str, &str)],
+        dpop_key: &DpopKey,
+    ) -> Result<std::result::Result<TokenResponse, String>> {
+        let dpop_proof = dpop_key.generate_proof("POST", &self.token_url)?;
         let res = self
             .http_client
             .post(&self.token_url)
             .header("DPoP", dpop_proof)
-            .form(&params)
+            .form(params)
             .send()
             .await?;
 
         if !res.status().is_success() {
-            let err = res.text().await?;
-            error!("Token exchange failed: {}", err);
-            anyhow::bail!("Token exchange failed: {}", err);
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            error!("Token endpoint returned {}: {}", status, body);
+            return Ok(Err(format!("{status}: {body}")));
         }
 
-        #[derive(Deserialize)]
-        struct TokenSuccess {
-            access_token: String,
-            token_type: Option<String>,
-        }
-
-        let data: TokenSuccess = res.json().await?;
-        match data.token_type.as_deref() {
+        let tokens: TokenResponse = res.json().await.context("Invalid token response")?;
+        match tokens.token_type.as_deref() {
             Some(t) if t.eq_ignore_ascii_case("DPoP") => {}
             other => warn!(
                 "Token endpoint returned token_type {:?} instead of \"DPoP\": the token is not \
@@ -595,10 +658,15 @@ impl AuthManager {
                 other
             ),
         }
-        self.vault.store_dpop_key(user_id, &dpop_key.to_bytes())?;
-        self.vault.store_token(user_id, &data.access_token)?;
-        info!("Successfully acquired and stored DPoP-bound token.");
+        Ok(Ok(tokens))
+    }
 
+    fn store_tokens(&self, user_id: &str, tokens: &TokenResponse) -> Result<()> {
+        self.vault.store_token(user_id, &tokens.access_token)?;
+        // A refresh response without refresh_token keeps the current one (RFC 6749 §6).
+        if let Some(refresh) = &tokens.refresh_token {
+            self.vault.store_refresh_token(user_id, refresh)?;
+        }
         Ok(())
     }
 

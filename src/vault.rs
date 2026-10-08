@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 enum Secret {
     Token,
     DpopKey,
+    RefreshToken,
 }
 
 impl Secret {
@@ -24,6 +25,7 @@ impl Secret {
         match self {
             Secret::Token => "token",
             Secret::DpopKey => "dpop",
+            Secret::RefreshToken => "refresh",
         }
     }
 
@@ -31,6 +33,7 @@ impl Secret {
         match self {
             Secret::Token => "token",
             Secret::DpopKey => "DPoP key",
+            Secret::RefreshToken => "refresh token",
         }
     }
 }
@@ -179,6 +182,21 @@ impl Vault {
     pub fn delete_dpop_key(&self, user_id: &str) -> Result<()> {
         self.delete(user_id, Secret::DpopKey)
     }
+
+    /// Stores a refresh token securely in the vault.
+    pub fn store_refresh_token(&self, user_id: &str, token: &str) -> Result<()> {
+        self.set(user_id, Secret::RefreshToken, token)
+    }
+
+    /// Retrieves the refresh token from the vault.
+    pub fn get_refresh_token(&self, user_id: &str) -> Result<Option<String>> {
+        self.get(user_id, Secret::RefreshToken)
+    }
+
+    /// Deletes the refresh token from the vault.
+    pub fn delete_refresh_token(&self, user_id: &str) -> Result<()> {
+        self.delete(user_id, Secret::RefreshToken)
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +245,20 @@ mod tests {
 
         vault.delete_token(user)?;
         assert_eq!(vault.get_token(user)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_vault_refresh_token_ops() -> Result<()> {
+        let vault = Vault::in_memory("mcp-passport-test");
+        vault.store_token("u", "access")?;
+        vault.store_refresh_token("u", "refresh")?;
+        assert_eq!(vault.get_refresh_token("u")?, Some("refresh".into()));
+        // Separate entries: the access token is untouched.
+        assert_eq!(vault.get_token("u")?, Some("access".into()));
+        vault.delete_refresh_token("u")?;
+        assert_eq!(vault.get_refresh_token("u")?, None);
+        assert_eq!(vault.get_token("u")?, Some("access".into()));
         Ok(())
     }
 

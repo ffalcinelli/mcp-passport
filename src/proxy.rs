@@ -58,6 +58,15 @@ pub struct Proxy {
 /// would loop.
 const AUTH_LOOP_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Why a request needs new credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReauthReason {
+    /// 401: the token is missing, expired or revoked. A refresh may fix it.
+    Unauthorized,
+    /// 403 `insufficient_scope`: more scopes are needed, which takes a new login.
+    StepUp,
+}
+
 /// What the proxy remembers about re-authentication attempts.
 #[derive(Default)]
 struct ReauthState {
@@ -65,8 +74,16 @@ struct ReauthState {
     attempts: u64,
     /// Why the last attempt failed, if it did.
     last_error: Option<String>,
-    /// When the last success happened, and the scopes it was for.
-    last_success: Option<(std::time::Instant, Option<Vec<String>>)>,
+    /// The last successful attempt.
+    last_success: Option<LastSuccess>,
+}
+
+struct LastSuccess {
+    at: std::time::Instant,
+    /// Scopes requested by that attempt.
+    scopes: Option<Vec<String>>,
+    /// Whether the token came from a refresh rather than a browser login.
+    via_refresh: bool,
 }
 
 /// A token and the DPoP key it is bound to.
@@ -249,12 +266,18 @@ impl Proxy {
         &self,
         challenge: &WwwAuthenticate,
         observed_gen: u64,
+        reason: ReauthReason,
     ) -> Result<()> {
         // Without a (valid) resource_metadata, discovery falls back to the well-known URIs.
         let metadata_url =
             validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
-        self.trigger_reauth(observed_gen, metadata_url.as_deref(), challenge.scope())
-            .await
+        self.trigger_reauth(
+            observed_gen,
+            metadata_url.as_deref(),
+            challenge.scope(),
+            reason,
+        )
+        .await
     }
 
     /// Handles 401 (expired/missing token) and 403 `insufficient_scope` (step-up).
@@ -269,16 +292,19 @@ impl Proxy {
             return Ok(false);
         }
         let challenge = WwwAuthenticate::parse(response.headers());
-        if status == StatusCode::UNAUTHORIZED {
+        let reason = if status == StatusCode::UNAUTHORIZED {
             warn!("401 Unauthorized received. Activating Airlock suspension...");
+            ReauthReason::Unauthorized
         } else if challenge.error() == Some("insufficient_scope") {
             warn!(
                 "403 Forbidden (insufficient_scope) received. Triggering step-up authentication..."
             );
+            ReauthReason::StepUp
         } else {
             return Ok(false);
-        }
-        self.reauth_for_challenge(&challenge, observed_gen).await?;
+        };
+        self.reauth_for_challenge(&challenge, observed_gen, reason)
+            .await?;
         Ok(true)
     }
 
@@ -426,26 +452,32 @@ impl Proxy {
     /// while waiting.
     ///
     /// `observed_gen` is the credential generation used by the request that was
-    /// rejected. Requests rejected together share a single browser login: once
-    /// one of them re-authenticates, the others reuse its result (or its
-    /// failure). A fresh token rejected again right away is reported as an
-    /// authentication loop instead of opening yet another login.
+    /// rejected. Requests rejected together share a single attempt: once one of
+    /// them re-authenticates, the others reuse its result (or its failure).
+    ///
+    /// For [`ReauthReason::Unauthorized`] a silent refresh is tried before the
+    /// browser login. A token from a browser login that is rejected again right
+    /// away is reported as an authentication loop instead of opening yet
+    /// another login.
     pub async fn trigger_reauth(
         &self,
         observed_gen: u64,
         metadata_url: Option<&str>,
         scopes: Option<Vec<String>>,
+        reason: ReauthReason,
     ) -> Result<()> {
+        let step_up = reason == ReauthReason::StepUp;
         let attempts_before = self.reauth_state.lock().await.attempts;
         let _guard = self.reauth_mutex.lock().await;
 
+        let mut allow_refresh = !step_up;
         {
             let state = self.reauth_state.lock().await;
             let current_gen = self.generation();
-            let covers = |granted: &Option<Vec<String>>| scopes.is_none() || &scopes == granted;
+            let covers = |last: &LastSuccess| !step_up || last.scopes == scopes;
 
             if current_gen != observed_gen {
-                if state.last_success.as_ref().is_some_and(|(_, g)| covers(g)) {
+                if state.last_success.as_ref().is_some_and(covers) {
                     info!("Credentials were renewed by another request; reusing them.");
                     return Ok(());
                 }
@@ -453,16 +485,21 @@ impl Proxy {
                 // An attempt ran while we waited and failed (the generation did not move).
                 let reason = state.last_error.clone().unwrap_or_default();
                 anyhow::bail!("Re-authentication failed: {}", reason);
-            } else if let Some((at, granted)) = &state.last_success {
-                if at.elapsed() < AUTH_LOOP_WINDOW && covers(granted) {
-                    error!(
-                        "Authentication loop detected: a token obtained {:?} ago was rejected.",
-                        at.elapsed()
-                    );
-                    anyhow::bail!(
-                        "Authentication loop detected: the server rejected a freshly issued token. \
-                         Please check your credentials and environment configuration."
-                    );
+            } else if let Some(last) = &state.last_success {
+                if last.at.elapsed() < AUTH_LOOP_WINDOW && covers(last) {
+                    if last.via_refresh {
+                        info!("The refreshed token was rejected; falling back to a new login.");
+                        allow_refresh = false;
+                    } else {
+                        error!(
+                            "Authentication loop detected: a token obtained {:?} ago was rejected.",
+                            last.at.elapsed()
+                        );
+                        anyhow::bail!(
+                            "Authentication loop detected: the server rejected a freshly issued token. \
+                             Please check your credentials and environment configuration."
+                        );
+                    }
                 }
             }
         }
@@ -473,9 +510,13 @@ impl Proxy {
         // `reauthenticate` bounds the interactive wait with `timeouts.auth`.
         let result = async {
             let auth_manager = self.ensure_auth_manager(metadata_url).await?;
+            if allow_refresh && auth_manager.refresh(&self.user_id).await? {
+                return Ok(true);
+            }
             auth_manager
                 .reauthenticate(&self.user_id, scopes.clone(), None)
-                .await
+                .await?;
+            Ok::<_, anyhow::Error>(false)
         }
         .await;
 
@@ -483,9 +524,13 @@ impl Proxy {
             let mut state = self.reauth_state.lock().await;
             state.attempts += 1;
             match &result {
-                Ok(()) => {
+                Ok(via_refresh) => {
                     state.last_error = None;
-                    state.last_success = Some((std::time::Instant::now(), scopes));
+                    state.last_success = Some(LastSuccess {
+                        at: std::time::Instant::now(),
+                        scopes,
+                        via_refresh: *via_refresh,
+                    });
                     self.reauth_count
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     info!("Re-authentication successful. Deactivating Airlock...");
@@ -497,7 +542,7 @@ impl Proxy {
             }
         }
         let _ = self.suspension_tx.send(false);
-        result
+        result.map(|_| ())
     }
 
     async fn wait_for_airlock(&self) -> Result<()> {
@@ -563,7 +608,14 @@ impl Proxy {
                                     sse_url
                                 );
                                 let challenge = WwwAuthenticate::parse(resp.headers());
-                                if let Err(e) = self.reauth_for_challenge(&challenge, gen).await {
+                                if let Err(e) = self
+                                    .reauth_for_challenge(
+                                        &challenge,
+                                        gen,
+                                        ReauthReason::Unauthorized,
+                                    )
+                                    .await
+                                {
                                     error!(
                                         "Re-authentication flow failed in SSE listener: {:?}",
                                         e
@@ -811,7 +863,11 @@ mod tests {
                     c.fetch_add(1, Ordering::SeqCst);
                     {
                         let mut state = p.reauth_state.lock().await;
-                        state.last_success = Some((std::time::Instant::now(), None));
+                        state.last_success = Some(LastSuccess {
+                            at: std::time::Instant::now(),
+                            scopes: None,
+                            via_refresh: false,
+                        });
                     }
                     p.reauth_count.fetch_add(1, Ordering::SeqCst);
                     (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized")
@@ -836,14 +892,18 @@ mod tests {
     async fn test_proxy_reauth_failure_resets_circuit_breaker() -> Result<()> {
         let proxy = undiscoverable_proxy();
 
-        let first = proxy.trigger_reauth(0, None, None).await;
+        let first = proxy
+            .trigger_reauth(0, None, None, ReauthReason::Unauthorized)
+            .await;
         assert!(first.is_err());
         assert!(proxy.reauth_state.lock().await.last_success.is_none());
         assert!(!*proxy.suspension_rx.borrow(), "airlock must be released");
 
         // A failed attempt must not arm the loop detector: retrying later runs
         // the flow again instead of reporting an authentication loop.
-        let second = proxy.trigger_reauth(0, None, None).await;
+        let second = proxy
+            .trigger_reauth(0, None, None, ReauthReason::Unauthorized)
+            .await;
         let err = second.unwrap_err().to_string();
         assert!(!err.contains("Authentication loop detected"), "{err}");
         assert_eq!(proxy.reauth_state.lock().await.attempts, 2);
@@ -854,13 +914,19 @@ mod tests {
     async fn test_proxy_trigger_reauth_reuses_renewal_by_other_request() -> Result<()> {
         let proxy = undiscoverable_proxy();
         // Another request re-authenticated after our credentials were loaded.
-        proxy.reauth_state.lock().await.last_success = Some((std::time::Instant::now(), None));
+        proxy.reauth_state.lock().await.last_success = Some(LastSuccess {
+            at: std::time::Instant::now(),
+            scopes: None,
+            via_refresh: false,
+        });
         proxy
             .reauth_count
             .store(1, std::sync::atomic::Ordering::SeqCst);
 
         // No network access happens: the renewal is reused.
-        proxy.trigger_reauth(0, None, None).await?;
+        proxy
+            .trigger_reauth(0, None, None, ReauthReason::Unauthorized)
+            .await?;
         assert_eq!(proxy.reauth_state.lock().await.attempts, 0);
         Ok(())
     }
@@ -868,14 +934,18 @@ mod tests {
     #[tokio::test]
     async fn test_proxy_trigger_reauth_step_up_not_covered_by_plain_renewal() -> Result<()> {
         let proxy = undiscoverable_proxy();
-        proxy.reauth_state.lock().await.last_success = Some((std::time::Instant::now(), None));
+        proxy.reauth_state.lock().await.last_success = Some(LastSuccess {
+            at: std::time::Instant::now(),
+            scopes: None,
+            via_refresh: false,
+        });
         proxy
             .reauth_count
             .store(1, std::sync::atomic::Ordering::SeqCst);
 
         // A step-up for new scopes still needs its own login (which fails here).
         let res = proxy
-            .trigger_reauth(0, None, Some(vec!["admin".into()]))
+            .trigger_reauth(0, None, Some(vec!["admin".into()]), ReauthReason::StepUp)
             .await;
         assert!(res.is_err());
         assert_eq!(proxy.reauth_state.lock().await.attempts, 1);
@@ -887,18 +957,44 @@ mod tests {
         let proxy = undiscoverable_proxy();
         // We re-authenticated just now and the request with that token (gen 1)
         // was rejected again.
-        proxy.reauth_state.lock().await.last_success = Some((std::time::Instant::now(), None));
+        proxy.reauth_state.lock().await.last_success = Some(LastSuccess {
+            at: std::time::Instant::now(),
+            scopes: None,
+            via_refresh: false,
+        });
         proxy
             .reauth_count
             .store(1, std::sync::atomic::Ordering::SeqCst);
 
-        let err = proxy.trigger_reauth(1, None, None).await.unwrap_err();
+        let err = proxy
+            .trigger_reauth(1, None, None, ReauthReason::Unauthorized)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("Authentication loop detected"));
 
+        // A rejected *refreshed* token is not a loop: it falls back to a login
+        // (which fails here for lack of discovery, with a different error).
+        proxy.reauth_state.lock().await.last_success = Some(LastSuccess {
+            at: std::time::Instant::now(),
+            scopes: None,
+            via_refresh: true,
+        });
+        let err = proxy
+            .trigger_reauth(1, None, None, ReauthReason::Unauthorized)
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains("Authentication loop detected"));
+
         // An old success does not count as a loop.
-        proxy.reauth_state.lock().await.last_success =
-            Some((std::time::Instant::now() - AUTH_LOOP_WINDOW * 2, None));
-        let err = proxy.trigger_reauth(1, None, None).await.unwrap_err();
+        proxy.reauth_state.lock().await.last_success = Some(LastSuccess {
+            at: std::time::Instant::now() - AUTH_LOOP_WINDOW * 2,
+            scopes: None,
+            via_refresh: false,
+        });
+        let err = proxy
+            .trigger_reauth(1, None, None, ReauthReason::Unauthorized)
+            .await
+            .unwrap_err();
         assert!(!err.to_string().contains("Authentication loop detected"));
         Ok(())
     }
@@ -932,9 +1028,14 @@ mod tests {
         );
 
         let p1 = proxy.clone();
-        let first = tokio::spawn(async move { p1.trigger_reauth(0, None, None).await });
+        let first = tokio::spawn(async move {
+            p1.trigger_reauth(0, None, None, ReauthReason::Unauthorized)
+                .await
+        });
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        let second = proxy.trigger_reauth(0, None, None).await;
+        let second = proxy
+            .trigger_reauth(0, None, None, ReauthReason::Unauthorized)
+            .await;
 
         assert!(first.await?.is_err());
         let err = second.unwrap_err().to_string();
