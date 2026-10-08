@@ -81,12 +81,18 @@ where
         &config.mcp_protocol_version,
         config.auth_scheme,
     );
-    let sse_url = config.remote_sse_url.clone();
+    // Streamable HTTP serves the GET stream on the MCP endpoint itself.
+    let sse_url = config
+        .remote_sse_url
+        .clone()
+        .unwrap_or_else(|| config.remote_mcp_url.clone());
 
-    // Task 1: Persistent SSE Listener (Server -> Client)
+    // Task 1: Persistent SSE Listener (Server -> Client). It starts after the
+    // first successful POST, so the session id (if any) is known.
     let sse_proxy = proxy.clone();
     let sse_stdout_tx = stdout_tx.clone();
     let sse_handle = tokio::spawn(async move {
+        sse_proxy.wait_until_connected().await;
         if let Err(e) = sse_proxy.listen_sse(&sse_url, sse_stdout_tx).await {
             error!("SSE listener failed: {:?}", e);
         }
@@ -143,24 +149,46 @@ where
     Ok(())
 }
 
+/// JSON-RPC 2.0 error codes used by the proxy.
+const PARSE_ERROR: i64 = -32700;
+const INTERNAL_ERROR: i64 = -32603;
+
+fn jsonrpc_error(id: serde_json::Value, code: i64, message: String) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    })
+    .to_string()
+}
+
 async fn process_message(proxy: Arc<Proxy>, line: String, stdout_tx: mpsc::Sender<String>) {
-    match serde_json::from_str::<serde_json::Value>(&line) {
-        Ok(payload) => {
-            let has_id = payload.get("id").is_some();
-            match proxy.handle_request(payload).await {
-                Ok(response) => {
-                    if has_id {
-                        if let Ok(res_str) = serde_json::to_string(&response) {
-                            let _ = stdout_tx.send(res_str).await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(error = ?e, "Failed to proxy request to remote server");
-                }
-            }
+    if line.trim().is_empty() {
+        return;
+    }
+    let payload = match serde_json::from_str::<serde_json::Value>(&line) {
+        Ok(payload) => payload,
+        Err(e) => {
+            error!("Invalid JSON received on stdio: {:?}", e);
+            let msg = jsonrpc_error(serde_json::Value::Null, PARSE_ERROR, "Parse error".into());
+            let _ = stdout_tx.send(msg).await;
+            return;
         }
-        Err(e) => error!("Invalid JSON received on stdio: {:?}", e),
+    };
+
+    // Only requests (method + id) expect a response; notifications and the
+    // client's responses to server requests must not get one.
+    let request_id = match (payload.get("method"), payload.get("id")) {
+        (Some(_), Some(id)) => Some(id.clone()),
+        _ => None,
+    };
+
+    if let Err(e) = proxy.handle_request(payload, &stdout_tx).await {
+        error!(error = ?e, "Failed to proxy request to remote server");
+        if let Some(id) = request_id {
+            let msg = jsonrpc_error(id, INTERNAL_ERROR, format!("mcp-passport: {e:#}"));
+            let _ = stdout_tx.send(msg).await;
+        }
     }
 }
 
@@ -190,6 +218,89 @@ mod tests {
         );
 
         process_message(proxy, "invalid json".to_string(), tx).await;
+        let resp: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(resp["id"], serde_json::Value::Null);
+        assert_eq!(resp["error"]["code"], PARSE_ERROR);
+    }
+
+    fn proxy_for(url: &str, vault: Vault) -> Arc<Proxy> {
+        Proxy::new(
+            url,
+            "user",
+            OidcConfig {
+                client_id: "c".into(),
+                redirect_url: "r".into(),
+                timeouts: crate::auth::Timeouts::fast(),
+                ..Default::default()
+            },
+            vault,
+            "v1",
+            AuthScheme::Bearer,
+        )
+    }
+
+    async fn serve_500() -> Result<String> {
+        let app = Router::new().route(
+            "/rpc",
+            post(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}/rpc", listener.local_addr()?);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok(url)
+    }
+
+    fn vault_with_credentials() -> Result<Vault> {
+        let vault = Vault::in_memory("svc");
+        vault.store_token("user", "valid")?;
+        vault.store_dpop_key("user", &crate::crypto::DpopKey::generate().to_bytes())?;
+        Ok(vault)
+    }
+
+    #[tokio::test]
+    async fn test_process_message_failure_becomes_jsonrpc_error() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(1);
+        let proxy = proxy_for(&serve_500().await?, vault_with_credentials()?);
+
+        process_message(
+            proxy,
+            json!({"jsonrpc": "2.0", "id": "req-7", "method": "tools/list"}).to_string(),
+            tx,
+        )
+        .await;
+
+        let resp: serde_json::Value = serde_json::from_str(&rx.try_recv()?)?;
+        assert_eq!(resp["id"], "req-7");
+        assert_eq!(resp["error"]["code"], INTERNAL_ERROR);
+        let message = resp["error"]["message"].as_str().unwrap();
+        assert!(message.contains("500"), "{message}");
+        assert!(message.contains("boom"), "{message}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_process_message_client_response_gets_no_error() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(1);
+        let proxy = proxy_for(&serve_500().await?, vault_with_credentials()?);
+
+        // A response to a server-initiated request has an id but no method.
+        process_message(
+            proxy,
+            json!({"jsonrpc": "2.0", "id": 3, "result": {}}).to_string(),
+            tx,
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_process_message_ignores_blank_lines() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let proxy = proxy_for("http://localhost:1/rpc", Vault::in_memory("svc"));
+        process_message(proxy, "   ".to_string(), tx).await;
         assert!(rx.try_recv().is_err());
     }
 
@@ -285,7 +396,7 @@ mod tests {
 
         let config = Config {
             remote_mcp_url: rpc_url,
-            remote_sse_url: format!("http://127.0.0.1:{}/sse", addr.port()),
+            remote_sse_url: Some(format!("http://127.0.0.1:{}/sse", addr.port())),
             user_id: "test-user".into(),
             oidc_discovery_url: None,
             oidc_client_id: "client".into(),

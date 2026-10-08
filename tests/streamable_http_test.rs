@@ -1,0 +1,326 @@
+//! MCP Streamable HTTP behaviour of the proxy, against small in-process servers.
+
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::{routing::get, routing::post, Router};
+use mcp_passport::auth::{OidcConfig, Timeouts};
+use mcp_passport::config::AuthScheme;
+use mcp_passport::crypto::DpopKey;
+use mcp_passport::proxy::Proxy;
+use mcp_passport::vault::Vault;
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+
+async fn serve(app: Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{}", addr)
+}
+
+/// A proxy whose vault already holds a token, so no auth flow runs.
+fn authed_proxy(url: &str) -> Arc<Proxy> {
+    let vault = Vault::in_memory("streamable-http-test");
+    vault.store_token("user", "valid_token").unwrap();
+    vault
+        .store_dpop_key("user", &DpopKey::generate().to_bytes())
+        .unwrap();
+    Proxy::new(
+        url,
+        "user",
+        OidcConfig {
+            client_id: "c".into(),
+            redirect_url: "http://127.0.0.1:1/callback".into(),
+            timeouts: Timeouts::fast(),
+            ..Default::default()
+        },
+        vault,
+        "2025-11-25",
+        AuthScheme::Bearer,
+    )
+}
+
+async fn collect(proxy: &Proxy, payload: Value) -> (anyhow::Result<()>, Vec<Value>) {
+    let (tx, mut rx) = mpsc::channel(16);
+    let res = proxy.handle_request(payload, &tx).await;
+    drop(tx);
+    let mut out = Vec::new();
+    while let Some(m) = rx.recv().await {
+        out.push(serde_json::from_str(&m).unwrap());
+    }
+    (res, out)
+}
+
+fn sse_response(events: &[Value]) -> axum::response::Response {
+    let body: String = events
+        .iter()
+        .enumerate()
+        .map(|(i, e)| format!("id: {i}\nevent: message\ndata: {e}\n\n"))
+        .collect();
+    ([("content-type", "text/event-stream")], body).into_response()
+}
+
+#[tokio::test]
+async fn test_post_sends_accept_header_for_json_and_sse() {
+    let seen = Arc::new(Mutex::new(None::<String>));
+    let seen_c = seen.clone();
+    let app = Router::new().route(
+        "/mcp",
+        post(move |headers: HeaderMap| {
+            let seen = seen_c.clone();
+            async move {
+                *seen.lock().unwrap() = headers
+                    .get("accept")
+                    .map(|v| v.to_str().unwrap().to_string());
+                axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": {}}))
+            }
+        }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    proxy
+        .call(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        seen.lock().unwrap().as_deref(),
+        Some("application/json, text/event-stream")
+    );
+}
+
+#[tokio::test]
+async fn test_sse_post_response_forwards_every_event() {
+    let app = Router::new().route(
+        "/mcp",
+        post(|| async {
+            sse_response(&[
+                json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}}),
+                json!({"jsonrpc": "2.0", "id": 5, "result": {"tools": []}}),
+            ])
+        }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+
+    let (res, out) = collect(
+        &proxy,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}),
+    )
+    .await;
+    res.unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0]["method"], "notifications/progress");
+    assert_eq!(out[1]["id"], 5);
+
+    // `call` picks the response out of the stream.
+    let resp = proxy
+        .call(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resp["result"]["tools"], json!([]));
+}
+
+#[tokio::test]
+async fn test_sse_post_response_without_answer_is_an_error() {
+    let app = Router::new().route(
+        "/mcp",
+        post(|| async {
+            sse_response(&[json!({"jsonrpc": "2.0", "method": "notifications/progress"})])
+        }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let (res, out) = collect(
+        &proxy,
+        json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call"}),
+    )
+    .await;
+    assert_eq!(out.len(), 1);
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("ended before the response"));
+}
+
+#[tokio::test]
+async fn test_accepted_forwards_nothing() {
+    let app = Router::new().route("/mcp", post(|| async { StatusCode::ACCEPTED }));
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let (res, out) = collect(
+        &proxy,
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )
+    .await;
+    res.unwrap();
+    assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn test_http_error_is_reported() {
+    let app = Router::new().route(
+        "/mcp",
+        post(|| async { (StatusCode::BAD_GATEWAY, "upstream down") }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let err = proxy
+        .call(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("502"), "{err}");
+    assert!(err.contains("upstream down"), "{err}");
+}
+
+#[tokio::test]
+async fn test_jsonrpc_error_in_non_2xx_body_is_passed_through() {
+    let app = Router::new().route(
+        "/mcp",
+        post(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32600, "message": "Invalid Request"}
+                })),
+            )
+        }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let resp = proxy
+        .call(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resp["error"]["code"], -32600);
+}
+
+#[tokio::test]
+async fn test_404_with_session_clears_session() {
+    let calls = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let calls_c = calls.clone();
+    let app = Router::new().route(
+        "/mcp",
+        post(move |headers: HeaderMap| {
+            let calls = calls_c.clone();
+            async move {
+                let sid = headers
+                    .get("mcp-session-id")
+                    .map(|v| v.to_str().unwrap().to_string());
+                calls.lock().unwrap().push(sid.clone());
+                match sid {
+                    None => (
+                        [("mcp-session-id", "s-1")],
+                        axum::Json(json!({"jsonrpc": "2.0", "id": 1, "result": {}})),
+                    )
+                        .into_response(),
+                    Some(_) => StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+
+    proxy.call(msg.clone()).await.unwrap();
+    let err = proxy.call(msg.clone()).await.unwrap_err().to_string();
+    assert!(err.contains("session expired"), "{err}");
+    // The stale session id is not sent again.
+    proxy.call(msg).await.unwrap();
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[0], None);
+    assert_eq!(calls[1].as_deref(), Some("s-1"));
+    assert_eq!(calls[2], None);
+}
+
+#[tokio::test]
+async fn test_wait_until_connected_after_successful_post() {
+    let app = Router::new().route("/mcp", post(|| async { StatusCode::ACCEPTED }));
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+
+    let p = proxy.clone();
+    let waiter = tokio::spawn(async move { p.wait_until_connected().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiter.is_finished());
+
+    proxy
+        .call(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(2), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_listen_sse_stops_on_405() {
+    let app = Router::new().route("/mcp", get(|| async { StatusCode::METHOD_NOT_ALLOWED }));
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let (tx, _rx) = mpsc::channel(4);
+    let res = timeout(
+        Duration::from_secs(2),
+        proxy.listen_sse(&format!("{base}/mcp"), tx),
+    )
+    .await
+    .expect("listener should stop on 405");
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn test_listen_sse_resumes_with_last_event_id() {
+    let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let seen_c = seen.clone();
+    let app = Router::new().route(
+        "/mcp",
+        get(move |headers: HeaderMap| {
+            let seen = seen_c.clone();
+            async move {
+                let last = headers
+                    .get("last-event-id")
+                    .map(|v| v.to_str().unwrap().to_string());
+                let n = {
+                    let mut s = seen.lock().unwrap();
+                    s.push(last);
+                    s.len()
+                };
+                // Each connection delivers one event, then closes.
+                let body = format!(
+                    "id: evt-{n}\ndata: {}\n\n",
+                    json!({"jsonrpc": "2.0", "method": "notifications/message", "params": {"n": n}})
+                );
+                ([("content-type", "text/event-stream")], body)
+            }
+        }),
+    );
+    let base = serve(app).await;
+    let proxy = authed_proxy(&format!("{base}/mcp"));
+    let (tx, mut rx) = mpsc::channel(4);
+    let p = proxy.clone();
+    let url = format!("{base}/mcp");
+    let handle = tokio::spawn(async move { p.listen_sse(&url, tx).await });
+
+    for _ in 0..2 {
+        timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    handle.abort();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0], None);
+    assert_eq!(seen[1].as_deref(), Some("evt-1"));
+}

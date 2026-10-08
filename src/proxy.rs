@@ -12,10 +12,11 @@ use crate::vault::Vault;
 use crate::Result;
 use anyhow::Context;
 use rand::Rng;
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
@@ -49,6 +50,8 @@ pub struct Proxy {
     last_reauth: Mutex<Option<std::time::Instant>>,
     /// Counter for re-authentication attempts.
     reauth_count: Arc<std::sync::atomic::AtomicU64>,
+    /// Set once a POST to the remote server has succeeded.
+    connected_tx: watch::Sender<bool>,
 }
 
 fn validate_resource_metadata(metadata_url: Option<&str>, remote_url: &str) -> Option<String> {
@@ -114,6 +117,7 @@ impl Proxy {
             reauth_mutex: Mutex::new(()),
             last_reauth: Mutex::new(None),
             reauth_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            connected_tx: watch::channel(false).0,
         })
     }
 
@@ -162,105 +166,107 @@ impl Proxy {
         Ok(am_shared)
     }
 
+    /// Builds a request to the remote server with the MCP headers and, when a
+    /// token is available, the Authorization and DPoP headers.
+    async fn build_request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        credentials: Option<(&str, &DpopKey)>,
+    ) -> Result<reqwest::RequestBuilder> {
+        let mut request = self
+            .http_client
+            .request(method.clone(), url)
+            .header("MCP-Protocol-Version", &self.protocol_version);
+
+        if let Some((token, dpop_key)) = credentials {
+            let dpop_proof = dpop_key.generate_proof_with_ath(method.as_str(), url, Some(token))?;
+            let auth_header = match self.auth_scheme {
+                AuthScheme::Bearer => format!("Bearer {}", token),
+                AuthScheme::Dpop => format!("DPoP {}", token),
+            };
+            request = request
+                .header(AUTHORIZATION, auth_header)
+                .header("DPoP", dpop_proof);
+        }
+
+        if let Some(s) = &*self.session_id.lock().await {
+            request = request.header("MCP-Session-Id", s);
+        }
+        Ok(request)
+    }
+
     async fn execute_request(
         &self,
         token_opt: Option<&String>,
         dpop_key_opt: Option<&DpopKey>,
         payload: &Value,
     ) -> Result<Option<reqwest::Response>> {
-        if let Some(token) = token_opt {
-            let dpop_key = match dpop_key_opt {
-                Some(key) => key,
-                None => {
-                    info!("No DPoP key found for user, triggering re-authentication...");
-                    self.trigger_reauth(None, None, None).await?;
-                    return Ok(None);
-                }
-            };
-
-            let dpop_proof =
-                dpop_key.generate_proof_with_ath("POST", &self.remote_url, Some(token))?;
-
-            let auth_header = match self.auth_scheme {
-                AuthScheme::Bearer => format!("Bearer {}", token),
-                AuthScheme::Dpop => format!("DPoP {}", token),
-            };
-
-            let mut request = self
-                .http_client
-                .post(&self.remote_url)
-                .header("Authorization", auth_header)
-                .header("DPoP", dpop_proof)
-                .header("MCP-Protocol-Version", &self.protocol_version);
-
-            {
-                let sid_lock = self.session_id.lock().await;
-                if let Some(s) = &*sid_lock {
-                    request = request.header("MCP-Session-Id", s);
-                }
+        let credentials = match (token_opt, dpop_key_opt) {
+            (Some(token), Some(key)) => Some((token.as_str(), key)),
+            (Some(_), None) => {
+                info!("No DPoP key found for user, triggering re-authentication...");
+                self.trigger_reauth(None, None, None).await?;
+                return Ok(None);
             }
-
-            Ok(Some(request.json(payload).send().await?))
-        } else {
-            // No token. Send unauthenticated request to trigger discovery via 401
-            info!(
-                "No token found for user, sending unauthenticated request to trigger discovery..."
-            );
-            let mut request = self
-                .http_client
-                .post(&self.remote_url)
-                .header("MCP-Protocol-Version", &self.protocol_version);
-
-            {
-                let sid_lock = self.session_id.lock().await;
-                if let Some(s) = &*sid_lock {
-                    request = request.header("MCP-Session-Id", s);
-                }
+            (None, _) => {
+                info!("No token found for user, sending unauthenticated request to trigger discovery...");
+                None
             }
+        };
 
-            Ok(Some(request.json(payload).send().await?))
-        }
+        let request = self
+            .build_request(reqwest::Method::POST, &self.remote_url, credentials)
+            .await?
+            .header(ACCEPT, "application/json, text/event-stream");
+        Ok(Some(request.json(payload).send().await?))
     }
 
+    /// Re-authenticates according to a `WWW-Authenticate` challenge.
+    async fn reauth_for_challenge(
+        &self,
+        challenge: &WwwAuthenticate,
+        token_opt: Option<&str>,
+    ) -> Result<()> {
+        // Without a (valid) resource_metadata, discovery falls back to the well-known URIs.
+        let metadata_url =
+            validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
+        self.trigger_reauth(token_opt, metadata_url.as_deref(), challenge.scope())
+            .await
+    }
+
+    /// Handles 401 (expired/missing token) and 403 `insufficient_scope` (step-up).
+    /// Returns `true` when the request should be retried.
     async fn handle_auth_challenge(
         &self,
         response: &reqwest::Response,
         token_opt: Option<&str>,
     ) -> Result<bool> {
-        if response.status() == StatusCode::UNAUTHORIZED {
+        let status = response.status();
+        if status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN {
+            return Ok(false);
+        }
+        let challenge = WwwAuthenticate::parse(response.headers());
+        if status == StatusCode::UNAUTHORIZED {
             warn!("401 Unauthorized received. Activating Airlock suspension...");
-            let challenge = WwwAuthenticate::parse(response.headers());
-
-            // Without a (valid) resource_metadata, discovery falls back to the well-known URIs.
-            let metadata_url =
-                validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
-            let scopes = challenge.scope();
-            self.trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
-                .await?;
-
-            return Ok(true);
+        } else if challenge.error() == Some("insufficient_scope") {
+            warn!(
+                "403 Forbidden (insufficient_scope) received. Triggering step-up authentication..."
+            );
+        } else {
+            return Ok(false);
         }
-
-        if response.status() == StatusCode::FORBIDDEN {
-            let challenge = WwwAuthenticate::parse(response.headers());
-            if challenge.error() == Some("insufficient_scope") {
-                warn!("403 Forbidden (insufficient_scope) received. Triggering step-up authentication...");
-
-                let metadata_url =
-                    validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
-                let scopes = challenge.scope();
-                self.trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
-                    .await?;
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        self.reauth_for_challenge(&challenge, token_opt).await?;
+        Ok(true)
     }
 
-    /// Primary entry point for stdio -> HTTP bridge.
-    /// It reads JSON-RPC payloads, attaches DPoP-bound tokens, and manages the Airlock.
-    pub async fn handle_request(self: Arc<Self>, payload: Value) -> Result<Value> {
+    /// Primary entry point for the stdio -> HTTP bridge.
+    ///
+    /// Sends one JSON-RPC message to the remote server (attaching DPoP-bound
+    /// tokens and managing the Airlock) and writes every message the server
+    /// returns for it to `out`: a JSON body, or each event of a
+    /// `text/event-stream` response (MCP Streamable HTTP).
+    pub async fn handle_request(&self, payload: Value, out: &mpsc::Sender<String>) -> Result<()> {
         let mut retry_count = 0;
         let max_retries = 2;
 
@@ -268,7 +274,7 @@ impl Proxy {
         let mut token_opt = None;
         let mut dpop_key_opt: Option<DpopKey> = None;
 
-        loop {
+        let response = loop {
             if retry_count > max_retries {
                 error!("Maximum retry attempts reached for request. Aborting to prevent infinite loop.");
                 anyhow::bail!("Maximum retry attempts reached");
@@ -302,27 +308,114 @@ impl Proxy {
                 retry_count += 1;
                 continue;
             }
+            break response;
+        };
 
-            // Capture Session ID if returned
-            if let Some(sid) = response
-                .headers()
-                .get("mcp-session-id")
-                .and_then(|h| h.to_str().ok())
-            {
-                let mut sid_lock = self.session_id.lock().await;
-                if sid_lock.as_ref().map(|s| s.as_str()) != Some(sid) {
-                    info!("New MCP Session ID captured: {}", sid);
-                    *sid_lock = Some(sid.to_string());
-                }
+        let status = response.status();
+
+        // A 404 for a request carrying a session id means the session is gone;
+        // the client has to start a new one with `initialize`.
+        if status == StatusCode::NOT_FOUND {
+            let mut sid = self.session_id.lock().await;
+            if let Some(old) = sid.take() {
+                warn!("MCP session {} expired (HTTP 404).", old);
+                anyhow::bail!("MCP session expired; re-initialize the connection");
             }
-
-            if response.status() == StatusCode::NO_CONTENT {
-                return Ok(Value::Null);
-            }
-
-            let body = response.json::<Value>().await?;
-            return Ok(body);
         }
+
+        if let Some(sid) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|h| h.to_str().ok())
+        {
+            let mut sid_lock = self.session_id.lock().await;
+            if sid_lock.as_deref() != Some(sid) {
+                info!("New MCP Session ID captured: {}", sid);
+                *sid_lock = Some(sid.to_string());
+            }
+        }
+
+        if status.is_success() {
+            let _ = self.connected_tx.send(true);
+        }
+
+        if status == StatusCode::ACCEPTED || status == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+
+        let is_event_stream = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("text/event-stream"));
+
+        if status.is_success() && is_event_stream {
+            return forward_event_stream(response, payload.get("id"), out).await;
+        }
+
+        let body = response.bytes().await?;
+        if status.is_success() {
+            if body.iter().all(u8::is_ascii_whitespace) {
+                return Ok(());
+            }
+            let value: Value = serde_json::from_slice(&body)
+                .context("Remote MCP server returned a body that is not JSON")?;
+            let _ = out.send(value.to_string()).await;
+            return Ok(());
+        }
+
+        // Some servers put a JSON-RPC error in a non-2xx response: pass it on as is.
+        if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+            if value.get("jsonrpc").is_some() && value.get("error").is_some() {
+                let _ = out.send(value.to_string()).await;
+                return Ok(());
+            }
+        }
+        let text = String::from_utf8_lossy(&body);
+        let snippet: String = text.chars().take(200).collect();
+        anyhow::bail!(
+            "Remote MCP server returned HTTP {}: {}",
+            status,
+            snippet.trim()
+        )
+    }
+
+    /// Sends one request and returns the server's response to it.
+    ///
+    /// Other messages the server streams back (e.g. progress notifications) are
+    /// dropped. Returns `Ok(None)` when nothing comes back, as for notifications.
+    pub async fn call(&self, payload: Value) -> Result<Option<Value>> {
+        let id = payload.get("id").cloned();
+        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let (res, messages) = tokio::join!(
+            async move { self.handle_request(payload, &tx).await },
+            async {
+                let mut messages = Vec::new();
+                while let Some(m) = rx.recv().await {
+                    messages.push(m);
+                }
+                messages
+            }
+        );
+        res?;
+        let mut parsed: Vec<Value> = messages
+            .iter()
+            .filter_map(|m| serde_json::from_str(m).ok())
+            .collect();
+        let pos = parsed
+            .iter()
+            .position(|m| id.is_some() && m.get("id") == id.as_ref());
+        Ok(match pos {
+            Some(i) => Some(parsed.swap_remove(i)),
+            None => parsed.pop(),
+        })
+    }
+
+    /// Resolves once a POST to the remote server has succeeded (so the session
+    /// id, if any, is known).
+    pub async fn wait_until_connected(&self) {
+        let mut rx = self.connected_tx.subscribe();
+        let _ = rx.wait_for(|connected| *connected).await;
     }
 
     pub async fn trigger_reauth(
@@ -479,33 +572,6 @@ impl Proxy {
         Ok(())
     }
 
-    /// Handles SSE events from the server and pipes them back to stdio.
-    async fn handle_sse_unauthorized(
-        &self,
-        sse_url: &str,
-        resp: reqwest::Response,
-        token_opt: Option<&str>,
-    ) {
-        warn!(
-            "401 Unauthorized received in SSE listener ({}). Triggering re-authentication...",
-            sse_url
-        );
-
-        let challenge = WwwAuthenticate::parse(resp.headers());
-        let metadata_url =
-            validate_resource_metadata(challenge.resource_metadata(), &self.remote_url);
-        let scopes = challenge.scope();
-        if let Err(e) = self
-            .trigger_reauth(token_opt, metadata_url.as_deref(), scopes)
-            .await
-        {
-            error!(
-                "Re-authentication flow failed in SSE listener: {:?}. Retrying connection in 5s...",
-                e
-            );
-        }
-    }
-
     pub async fn listen_sse(
         &self,
         sse_url: &str,
@@ -517,6 +583,7 @@ impl Proxy {
         let mut last_reauth_count: Option<u64> = None;
         let mut token_opt = None;
         let mut dpop_key_opt: Option<DpopKey> = None;
+        let mut last_event_id: Option<String> = None;
 
         loop {
             self.wait_for_airlock().await?;
@@ -529,40 +596,25 @@ impl Proxy {
                 last_reauth_count = Some(current_reauth_count);
             }
 
-            let mut request = if let Some(token) = token_opt.as_ref() {
-                let dpop_key = match dpop_key_opt {
-                    Some(ref key) => key,
-                    None => {
-                        info!("No DPoP key found for user in SSE listener, triggering re-authentication...");
-                        self.trigger_reauth(None, None, None).await?;
-                        continue;
-                    }
-                };
-
-                let dpop_proof = dpop_key.generate_proof_with_ath("GET", sse_url, Some(token))?;
-
-                let auth_header = match self.auth_scheme {
-                    AuthScheme::Bearer => format!("Bearer {}", token),
-                    AuthScheme::Dpop => format!("DPoP {}", token),
-                };
-
-                self.http_client
-                    .get(sse_url)
-                    .header("Authorization", auth_header)
-                    .header("DPoP", dpop_proof)
-                    .header("MCP-Protocol-Version", &self.protocol_version)
-            } else {
-                info!("No token found for user in SSE listener, sending unauthenticated request to trigger discovery...");
-                self.http_client
-                    .get(sse_url)
-                    .header("MCP-Protocol-Version", &self.protocol_version)
+            let credentials = match (token_opt.as_deref(), dpop_key_opt.as_ref()) {
+                (Some(token), Some(key)) => Some((token, key)),
+                (Some(_), None) => {
+                    info!("No DPoP key found for user in SSE listener, triggering re-authentication...");
+                    self.trigger_reauth(None, None, None).await?;
+                    continue;
+                }
+                (None, _) => {
+                    info!("No token found for user in SSE listener, sending unauthenticated request to trigger discovery...");
+                    None
+                }
             };
 
-            {
-                let sid_lock = self.session_id.lock().await;
-                if let Some(s) = &*sid_lock {
-                    request = request.header("MCP-Session-Id", s);
-                }
+            let mut request = self
+                .build_request(reqwest::Method::GET, sse_url, credentials)
+                .await?;
+            if let Some(id) = &last_event_id {
+                // Lets the server replay what we missed (resumability).
+                request = request.header("Last-Event-ID", id);
             }
 
             info!("Opening SSE connection to {}...", sse_url);
@@ -572,19 +624,44 @@ impl Proxy {
                 match event {
                     Ok(reqwest_eventsource::Event::Message(message)) => {
                         tracing::debug!(event = %message.event, id = %message.id, "Received SSE message");
-                        let _ = stdout_tx.send(message.data).await;
+                        if !message.id.is_empty() {
+                            last_event_id = Some(message.id);
+                        }
+                        if !message.data.is_empty() {
+                            let _ = stdout_tx.send(message.data).await;
+                        }
                     }
                     Ok(reqwest_eventsource::Event::Open) => info!("SSE connection established"),
                     Err(reqwest_eventsource::Error::InvalidStatusCode(status, resp)) => {
                         source.close();
-                        if status.as_u16() == 401 {
-                            self.handle_sse_unauthorized(sse_url, resp, token_opt.as_deref())
-                                .await;
-                        } else {
-                            error!(
+                        match status {
+                            StatusCode::UNAUTHORIZED => {
+                                warn!(
+                                    "401 Unauthorized received in SSE listener ({}). Triggering re-authentication...",
+                                    sse_url
+                                );
+                                let challenge = WwwAuthenticate::parse(resp.headers());
+                                if let Err(e) = self
+                                    .reauth_for_challenge(&challenge, token_opt.as_deref())
+                                    .await
+                                {
+                                    error!(
+                                        "Re-authentication flow failed in SSE listener: {:?}",
+                                        e
+                                    );
+                                }
+                            }
+                            StatusCode::METHOD_NOT_ALLOWED => {
+                                info!(
+                                    "Remote server does not offer an SSE stream at {} (405); SSE listener stopped.",
+                                    sse_url
+                                );
+                                return Ok(());
+                            }
+                            _ => error!(
                                 "SSE error: Invalid status code {} from {}. Response: {:?}",
                                 status, sse_url, resp
-                            );
+                            ),
                         }
                         break;
                     }
@@ -604,6 +681,39 @@ impl Proxy {
             tokio::time::sleep(delay).await;
         }
     }
+}
+
+/// Forwards each event of a `text/event-stream` POST response to `out`.
+///
+/// Fails if the stream ends before the response to `request_id` arrived, so
+/// that the client gets an error instead of waiting forever.
+async fn forward_event_stream(
+    response: reqwest::Response,
+    request_id: Option<&Value>,
+    out: &mpsc::Sender<String>,
+) -> Result<()> {
+    use eventsource_stream::Eventsource;
+    use futures::StreamExt;
+
+    let mut answered = request_id.is_none();
+    let mut events = response.bytes_stream().eventsource();
+    while let Some(event) = events.next().await {
+        let event = event.context("Error reading SSE response stream")?;
+        if event.data.is_empty() {
+            continue;
+        }
+        if !answered {
+            if let Ok(msg) = serde_json::from_str::<Value>(&event.data) {
+                answered = msg.get("id") == request_id
+                    && (msg.get("result").is_some() || msg.get("error").is_some());
+            }
+        }
+        let _ = out.send(event.data).await;
+    }
+    if !answered {
+        anyhow::bail!("SSE response stream ended before the response was received");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -764,7 +874,7 @@ mod tests {
         });
 
         let res = proxy
-            .handle_request(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+            .call(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
             .await;
         stop_updating.store(true, Ordering::SeqCst);
 
@@ -811,9 +921,9 @@ mod tests {
         vault.store_dpop_key("user", &crate::crypto::DpopKey::generate().to_bytes())?;
 
         let res = proxy
-            .handle_request(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+            .call(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
             .await?;
-        assert_eq!(res, serde_json::Value::Null);
+        assert_eq!(res, None);
         Ok(())
     }
 

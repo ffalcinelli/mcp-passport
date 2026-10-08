@@ -166,7 +166,7 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     let proxy_call = proxy.clone();
     let first_request = tokio::spawn(async move {
         proxy_call
-            .handle_request(json!({
+            .call(json!({
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/list",
@@ -219,7 +219,7 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
     let start = std::time::Instant::now();
     let res2 = timeout(
         Duration::from_secs(5),
-        proxy.clone().handle_request(json!({
+        proxy.clone().call(json!({
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/list",
@@ -230,7 +230,7 @@ async fn test_agent_simulation_with_docker() -> anyhow::Result<()> {
 
     let duration = start.elapsed();
     info!("Second request completed in {:?}", duration);
-    assert!(res2.get("result").is_some());
+    assert!(res2.and_then(|r| r.get("result").cloned()).is_some());
     assert!(
         duration < Duration::from_millis(2000), // Slightly relaxed for CI overhead but still ensures no re-auth
         "Second request took too long ({:?}), likely triggered re-auth",

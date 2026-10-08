@@ -206,7 +206,7 @@ async fn test_full_compliance_flow_headless() -> anyhow::Result<()> {
         let mut writer = proxy_writer;
         while let Ok(Some(line)) = reader.next_line().await {
             if let Ok(payload) = serde_json::from_str::<Value>(&line) {
-                if let Ok(res) = p.clone().handle_request(payload).await {
+                if let Ok(Some(res)) = p.call(payload).await {
                     let _ = writer.write_all(format!("{}\n", res).as_bytes()).await;
                     let _ = writer.flush().await;
                 }

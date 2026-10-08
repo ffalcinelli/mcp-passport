@@ -205,7 +205,7 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     let proxy_call = proxy.clone();
     let request_task = tokio::spawn(async move {
         proxy_call
-            .handle_request(json!({
+            .call(json!({
                 "jsonrpc": "2.0",
                 "id": "list-1",
                 "method": "tools/list",
@@ -251,13 +251,13 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
     info!("Waiting for first request to complete...");
     let res = timeout(Duration::from_secs(90), request_task).await??;
     info!("Request result: {:?}", res);
-    let val = res.context("Request failed")?;
+    let val = res.context("Request failed")?.context("No response")?;
     assert!(val.get("result").is_some(), "Result missing in response");
 
     // 9. Invoke a tool
     info!("Invoking mock tool...");
     let res_tool = proxy
-        .handle_request(json!({
+        .call(json!({
             "jsonrpc": "2.0",
             "id": "call-1",
             "method": "tools/call",
@@ -266,7 +266,8 @@ async fn test_jdoe_login_and_tool_invocation() -> anyhow::Result<()> {
                 "arguments": { "input": "hello" }
             }
         }))
-        .await?;
+        .await?
+        .context("No response to tools/call")?;
 
     info!("Tool call result: {:?}", res_tool);
     assert!(res_tool.get("result").is_some());

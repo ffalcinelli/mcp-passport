@@ -1732,6 +1732,7 @@ dependencies = [
  "clap",
  "colored",
  "criterion",
+ "eventsource-stream",
  "fantoccini",
  "futures",
  "hex",

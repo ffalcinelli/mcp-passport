@@ -130,8 +130,9 @@ async fn test_fapi_dpop_proxy_with_testcontainers() -> anyhow::Result<()> {
         while let Ok(Some(line)) = reader.next_line().await {
             let p = proxy_task.clone();
             if let Ok(payload) = serde_json::from_str::<Value>(&line) {
-                match p.handle_request(payload).await {
-                    Ok(response) => {
+                match p.call(payload).await {
+                    Ok(None) => {}
+                    Ok(Some(response)) => {
                         let res_line = format!("{}\n", serde_json::to_string(&response).unwrap());
                         let _ = writer.write_all(res_line.as_bytes()).await;
                         let _ = writer.flush().await;

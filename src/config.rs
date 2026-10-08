@@ -18,13 +18,13 @@ pub struct Config {
     )]
     pub remote_mcp_url: String,
 
-    /// Remote MCP server SSE endpoint
+    /// Remote MCP server SSE endpoint (defaults to --remote-mcp-url, as in Streamable HTTP)
     #[arg(
         long,
         env = "MCP_PASSPORT_REMOTE_SSE_URL",
         help_heading = "Server Configuration"
     )]
-    pub remote_sse_url: String,
+    pub remote_sse_url: Option<String>,
 
     /// MCP Protocol Version to include in headers
     #[arg(

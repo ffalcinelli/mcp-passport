@@ -127,7 +127,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         Duration::from_secs(5),
         proxy
             .clone()
-            .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+            .call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
     assert!(res1.is_err());
@@ -136,7 +136,7 @@ async fn test_reauth_loop_reset_on_failure() -> anyhow::Result<()> {
         Duration::from_secs(5),
         proxy
             .clone()
-            .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"})),
+            .call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"})),
     )
     .await?;
     assert!(res2.is_err());
@@ -205,7 +205,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
     );
     let res1 = timeout(
         Duration::from_secs(2),
-        proxy1.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy1.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
     let err1 = format!("{:?}", res1.err().unwrap());
@@ -221,7 +221,7 @@ async fn test_discovery_url_construction() -> anyhow::Result<()> {
     );
     let res2 = timeout(
         Duration::from_secs(2),
-        proxy2.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy2.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
     let err2 = format!("{:?}", res2.err().unwrap());
@@ -306,14 +306,14 @@ async fn test_concurrent_reauth_regression() -> anyhow::Result<()> {
 
     let p1 = proxy.clone();
     let task1 = tokio::spawn(async move {
-        p1.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+        p1.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
             .await
     });
 
     let p2 = proxy.clone();
     let task2 = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        p2.handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        p2.call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
             .await
     });
 
@@ -376,7 +376,7 @@ async fn test_max_retries_exhaustion() -> anyhow::Result<()> {
 
     let res = timeout(
         Duration::from_secs(5),
-        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
 
@@ -593,7 +593,7 @@ async fn test_403_step_up_trigger() -> anyhow::Result<()> {
     // This should trigger 403, then discovery, then PAR, then wait for callback.
     let res = timeout(
         Duration::from_secs(2),
-        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
 
@@ -686,7 +686,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
     let p1 = p.clone();
     let task1 = tokio::spawn(async move {
         let _ = p1
-            .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+            .call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
             .await;
     });
 
@@ -694,7 +694,7 @@ async fn test_redundant_reauth_skip() -> anyhow::Result<()> {
 
     vault.store_token(user, "new_token")?;
     let res = p
-        .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        .call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
         .await;
 
     assert!(res.is_err() || res.is_ok());
@@ -744,19 +744,19 @@ async fn test_proxy_no_content_and_session_id() -> anyhow::Result<()> {
         AuthScheme::Bearer,
     );
 
-    // First request should capture session ID and return Null (for NO_CONTENT)
+    // First request should capture session ID and return nothing (for NO_CONTENT)
     let res1 = proxy
         .clone()
-        .handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
+        .call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"}))
         .await?;
-    assert_eq!(res1, serde_json::Value::Null);
+    assert_eq!(res1, None);
 
     // Second request should include the session ID
     // We can't easily verify the header here without changing the mock, but we can check if it finishes.
     let res2 = proxy
-        .handle_request(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
+        .call(json!({"jsonrpc": "2.0", "id": 2, "method": "test"}))
         .await?;
-    assert_eq!(res2, serde_json::Value::Null);
+    assert_eq!(res2, None);
 
     Ok(())
 }
@@ -809,7 +809,7 @@ async fn test_proxy_reauth_timeout() -> anyhow::Result<()> {
     // This should time out because "a", "t", "p" are invalid URLs or won't respond
     let res = timeout(
         Duration::from_secs(5),
-        proxy.handle_request(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
+        proxy.call(json!({"jsonrpc": "2.0", "id": 1, "method": "test"})),
     )
     .await?;
 
